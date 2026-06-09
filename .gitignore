@@ -1,0 +1,14 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Omniverse runtime state
+*.etli
+damage_state.json
+alerts.csv
+
+# Auto-generated template metadata
+rendered_template_metadata.json
+
+# Internal development docs
+extensions/bridge.digitaltwin/docs/
