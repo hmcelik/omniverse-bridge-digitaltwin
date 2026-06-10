@@ -46,11 +46,14 @@ class BridgeUIMixin:
                                                   clicked_fn=lambda: self._set_tab("live"))
                     self._tab_manual = ui.Button("Manual Test", height=28,
                                                   clicked_fn=lambda: self._set_tab("manual"))
+                    self._tab_sim    = ui.Button("Simulation", height=28,
+                                                  clicked_fn=lambda: self._set_tab("sim"))
                     self._tab_conn   = ui.Button("Connection", height=28,
                                                   clicked_fn=lambda: self._set_tab("conn"))
 
                 self._live_frame   = ui.Frame()
                 self._manual_frame = ui.Frame(visible=False)
+                self._sim_frame    = ui.Frame(visible=False)
                 self._conn_frame   = ui.Frame(visible=False)
 
                 with self._live_frame:
@@ -102,12 +105,9 @@ class BridgeUIMixin:
                         with ui.HStack(height=28, spacing=6):
                             ui.Button("Reset damage", height=26,
                                       clicked_fn=self._on_reset_damage)
-                            ui.Button("Simulate pass", height=26,
-                                      clicked_fn=self._on_simulate_pass)
-                        self._sim_toggle_btn = ui.Button(
-                            "Start simulation", height=28,
-                            clicked_fn=self._on_toggle_sim,
-                            style={"background_color": 0xFF222244})
+                            ui.Button("Connect WebSocket", height=26,
+                                      clicked_fn=self._on_connect_websocket,
+                                      style={"background_color": 0xFF2255AA})
 
                         ui.Separator(height=4)
 
@@ -170,20 +170,12 @@ class BridgeUIMixin:
                         ui.Label("Educational model -- demo cross-sections.",
                                  style={"color": 0xFF888888})
 
-                with self._conn_frame:
+                with self._sim_frame:
                     with ui.VStack(spacing=5):
-                        ui.Label("Sensor Connection", style={"color": 0xFFCCCCCC})
+                        ui.Label("Simulation traffic", style={"color": 0xFFCCCCCC})
                         ui.Separator(height=3)
                         with ui.HStack(height=22):
-                            ui.Label("Mode:", width=80)
-                            self._conn_mode_idx = 0
-                            self._conn_mode_combo = ui.ComboBox(
-                                0, "WebSocket / ngrok", "Simulation",
-                                "Serial / COM", "WiFi / UDP")
-                            self._conn_mode_combo.model.add_item_changed_fn(
-                                self._on_conn_mode_changed)
-                        with ui.HStack(height=22):
-                            ui.Label("Traffic:", width=80)
+                            ui.Label("Pattern:", width=80)
                             self._conn_traffic_idx = self._traffic_mode_to_index(
                                 getattr(self._conn_config, "traffic_mode",
                                         TrafficMode.UNIFORM.value))
@@ -193,6 +185,62 @@ class BridgeUIMixin:
                                 "Rush hour")
                             self._conn_traffic_combo.model.add_item_changed_fn(
                                 self._on_traffic_mode_changed)
+                        with ui.HStack(height=28, spacing=6):
+                            ui.Button("Run simulation", height=26,
+                                      clicked_fn=self._on_apply_simulation,
+                                      style={"background_color": 0xFF224422})
+                            ui.Button("Pause / resume", height=26,
+                                      clicked_fn=self._on_toggle_sim)
+                        self._sim_status_lbl = ui.Label(
+                            "Simulation: not active",
+                            style={"color": 0xFF888888})
+                        ui.Separator(height=4)
+                        ui.Label("VEHICLE", style={"color": 0xFF888888})
+                        self._sim_lbl_speed = ui.Label("Speed: --")
+                        self._sim_lbl_weight = ui.Label("Weight: --   pos: --")
+                        ui.Separator(height=3)
+                        ui.Label("BRIDGE", style={"color": 0xFF888888})
+                        self._sim_lbl_capacity = ui.Label(
+                            "Capacity: --  |  Speed limit: --",
+                            style={"color": 0xFF88CCFF})
+                        self._sim_lbl_worst_stress = ui.Label("Stress: --")
+                        self._sim_lbl_sensor_residuals = ui.Label(
+                            "Gauge residuals: --",
+                            style={"color": 0xFF888888})
+                        with ui.HStack(height=18):
+                            self._sim_lbl_worst_damage = ui.Label("Damage: --")
+                            self._sim_lbl_passes = ui.Label(
+                                "Passes: 0", style={"color": 0xFF888888})
+                        self._sim_lbl_worst_crack = ui.Label(
+                            "Crack: --", style={"color": 0xFF88FF88})
+                        ui.Separator(height=3)
+                        ui.Label("ALERTS", style={"color": 0xFF888888})
+                        self._sim_alert_labels = [
+                            ui.Label("", height=42, width=0)
+                            for _ in range(3)
+                        ]
+                        ui.Separator(height=4)
+                        ui.Label("Generated traffic uses model-scale vehicle weights.",
+                                 style={"color": 0xFF888888})
+                        ui.Label("Uniform: random weight, speed, and gap.",
+                                 style={"color": 0xFF777777})
+                        ui.Label("Realistic: light/heavy mix with traffic intensity.",
+                                 style={"color": 0xFF777777})
+                        ui.Label("Rush hour: denser flow, more heavy vehicles, slower centre speed.",
+                                 style={"color": 0xFF777777})
+
+                with self._conn_frame:
+                    with ui.VStack(spacing=5):
+                        ui.Label("Physical sensor connection", style={"color": 0xFFCCCCCC})
+                        ui.Separator(height=3)
+                        with ui.HStack(height=22):
+                            ui.Label("Mode:", width=80)
+                            self._conn_mode_idx = 0
+                            self._conn_mode_combo = ui.ComboBox(
+                                0, "WebSocket / ngrok", "Serial / COM",
+                                "WiFi / UDP")
+                            self._conn_mode_combo.model.add_item_changed_fn(
+                                self._on_conn_mode_changed)
                         ui.Separator(height=3)
                         ui.Label("WebSocket settings", style={"color": 0xFF888888})
                         with ui.HStack(height=22):
@@ -226,6 +274,7 @@ class BridgeUIMixin:
                                   style={"background_color": 0xFF2255AA})
                         self._conn_status = ui.Label(
                             "Mode: WebSocket / ngrok", style={"color": 0xFF00BBFF})
+
                         ui.Separator(height=3)
                         ui.Label("Strain gauge channels -- attach sensors to these members:",
                                  style={"color": 0xFF888888})
@@ -272,11 +321,13 @@ class BridgeUIMixin:
         self._posx_model.add_value_changed_fn(lambda m: self._maybe_live())
         self._posy_model.add_value_changed_fn(lambda m: self._maybe_live())
         self._update_crack_label()
+        self._sync_simulation_readouts()
         self._refresh_model_labels()
 
     def _set_tab(self, tab: str):
         self._live_frame.visible   = (tab == "live")
         self._manual_frame.visible = (tab == "manual")
+        self._sim_frame.visible    = (tab == "sim")
         self._conn_frame.visible   = (tab == "conn")
 
     def _wrap_alert_text(self, text: str) -> str:
@@ -287,6 +338,33 @@ class BridgeUIMixin:
             break_long_words=False,
             break_on_hyphens=False,
         ))
+
+    def _copy_label_state(self, src, dst) -> None:
+        if not src or not dst:
+            return
+        dst.text = src.text
+        try:
+            dst.style = src.style
+        except Exception:
+            pass
+
+    def _sync_simulation_readouts(self) -> None:
+        pairs = [
+            ("_lbl_speed", "_sim_lbl_speed"),
+            ("_lbl_weight", "_sim_lbl_weight"),
+            ("_lbl_capacity", "_sim_lbl_capacity"),
+            ("_lbl_worst_stress", "_sim_lbl_worst_stress"),
+            ("_lbl_sensor_residuals", "_sim_lbl_sensor_residuals"),
+            ("_lbl_worst_damage", "_sim_lbl_worst_damage"),
+            ("_lbl_passes", "_sim_lbl_passes"),
+            ("_lbl_worst_crack", "_sim_lbl_worst_crack"),
+        ]
+        for src_name, dst_name in pairs:
+            if hasattr(self, src_name) and hasattr(self, dst_name):
+                self._copy_label_state(getattr(self, src_name), getattr(self, dst_name))
+        if hasattr(self, "_alert_labels") and hasattr(self, "_sim_alert_labels"):
+            for src, dst in zip(self._alert_labels, self._sim_alert_labels):
+                self._copy_label_state(src, dst)
 
     def _on_mode_change(self, model, item):
         idx = model.get_item_value_model(item).as_int
@@ -534,6 +612,8 @@ class BridgeUIMixin:
         color = 0xFF88FF88 if ratio < 0.5 else (
             0xFF00AAFF if ratio < 0.9 else 0xFF5555FF)
         self._lbl_worst_crack.style = {"color": color}
+        if hasattr(self, "_sync_simulation_readouts"):
+            self._sync_simulation_readouts()
 
     def _on_env_exposure_changed(self, model, item) -> None:
         idx = self._combo_item_index(
@@ -559,9 +639,13 @@ class BridgeUIMixin:
             f"Env: {exposure} | RH: {rh_pct:.0f}% | yield -{kd_pct:.1f}%")
 
     # Connection tab callback
+    def _on_connect_websocket(self):
+        self._conn_mode_idx = 0
+        self._on_reconnect()
+
     def _on_reconnect(self):
         mode_idx = getattr(self, "_conn_mode_idx", 0)
-        mode = ("websocket", "sim", "serial", "wifi")[mode_idx]
+        mode = ("websocket", "serial", "wifi")[mode_idx]
         traffic_mode = self._traffic_index_to_mode(
             getattr(self, "_conn_traffic_idx", 0))
 
@@ -581,46 +665,54 @@ class BridgeUIMixin:
         self._sensor.set_traffic_mode(traffic_mode)
         self._sensor.reconfigure(config)
 
-        mode_label = {"websocket": "WebSocket / ngrok", "sim": "simulation",
+        mode_label = {"websocket": "WebSocket / ngrok",
                       "serial": "serial / COM", "wifi": "WiFi / UDP"}[mode]
         self._conn_status.text = f"Mode: {mode_label}"
-        self._conn_status.style = {
-            "color": 0xFF88FF88 if mode == "sim" else 0xFF00BBFF}
-        if mode == "sim":
-            self._sim_toggle_btn.text = "Stop simulation"
-            self._sim_toggle_btn.style = {"background_color": 0xFF224422}
-        else:
-            self._sim_toggle_btn.text = "Start simulation"
-            self._sim_toggle_btn.style = {"background_color": 0xFF222244}
+        self._conn_status.style = {"color": 0xFF00BBFF}
+        if hasattr(self, "_sim_status_lbl"):
+            self._sim_status_lbl.text = "Simulation: not active"
+            self._sim_status_lbl.style = {"color": 0xFF888888}
+
+    def _on_apply_simulation(self):
+        gauge_map = {ch: m for ch, m in enumerate(self._gauged_members[:2])}
+        traffic_mode = self._traffic_index_to_mode(
+            getattr(self, "_conn_traffic_idx", 0))
+        config = ConnectionConfig(
+            mode="sim",
+            traffic_mode=traffic_mode,
+            gauge_channel_map=gauge_map,
+        )
+        self._conn_config = config
+        self._sensor.reconfigure(config)
+        if hasattr(self, "_conn_status"):
+            self._conn_status.text = "Mode: physical sensor disconnected"
+            self._conn_status.style = {"color": 0xFF888888}
+        if hasattr(self, "_sim_status_lbl"):
+            labels = {
+                TrafficMode.UNIFORM.value: "Uniform random",
+                TrafficMode.REALISTIC.value: "Realistic spectrum",
+                TrafficMode.RUSH_HOUR.value: "Rush hour",
+            }
+            self._sim_status_lbl.text = (
+                f"Simulation: running ({labels.get(traffic_mode, traffic_mode)})")
+            self._sim_status_lbl.style = {"color": 0xFF88FF88}
 
     # Button callbacks
     def _on_toggle_sim(self):
         if self._sensor.mode != "sim":
-            gauge_map = {ch: m for ch, m in enumerate(self._gauged_members[:2])}
-            traffic_mode = self._traffic_index_to_mode(
-                getattr(self, "_conn_traffic_idx", 0))
-            config = ConnectionConfig(
-                mode="sim",
-                traffic_mode=traffic_mode,
-                gauge_channel_map=gauge_map,
-            )
-            self._conn_config = config
-            self._sensor.reconfigure(config)
-            self._sim_toggle_btn.text = "Stop simulation"
-            self._sim_toggle_btn.style = {"background_color": 0xFF224422}
-            if hasattr(self, "_conn_status"):
-                self._conn_status.text = "Mode: simulation"
-                self._conn_status.style = {"color": 0xFF88FF88}
+            self._on_apply_simulation()
             return
 
         if self._sensor.sim_paused:
             self._sensor.resume_sim()
-            self._sim_toggle_btn.text = "Stop simulation"
-            self._sim_toggle_btn.style = {"background_color": 0xFF224422}
+            if hasattr(self, "_sim_status_lbl"):
+                self._sim_status_lbl.text = "Simulation: running"
+                self._sim_status_lbl.style = {"color": 0xFF88FF88}
         else:
             self._sensor.pause_sim()
-            self._sim_toggle_btn.text = "Start simulation"
-            self._sim_toggle_btn.style = {"background_color": 0xFF222244}
+            if hasattr(self, "_sim_status_lbl"):
+                self._sim_status_lbl.text = "Simulation: paused"
+                self._sim_status_lbl.style = {"color": 0xFF00AAFF}
 
     def _on_reset_damage(self):
         self._damage.reset()
@@ -628,6 +720,9 @@ class BridgeUIMixin:
             self._apply_colors(self._last_fem)
         for lbl in self._alert_labels:
             lbl.text = ""
+        if hasattr(self, "_sim_alert_labels"):
+            for lbl in self._sim_alert_labels:
+                lbl.text = ""
         self._lbl_worst_damage.text = "--"
         self._lbl_passes.text = "Passes: 0"
         self._lbl_dyn_status.text = "Dynamic FEM: idle"
@@ -636,6 +731,7 @@ class BridgeUIMixin:
         self._last_dyn_result = None
         self._env_yield_knockdown = 0.0
         self._fast_vs_accurate_error = None
+        self._sync_simulation_readouts()
 
     def _on_simulate_pass(self):
         rng = random.Random()

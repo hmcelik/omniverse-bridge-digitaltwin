@@ -703,6 +703,8 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
             _, _, mt = self._topo.members[worst_idx]
             self._lbl_worst_stress.text = (
                 f"M{worst_idx} ({mt})   {worst_ratio*100:.1f}% yield")
+        if hasattr(self, "_sync_simulation_readouts"):
+            self._sync_simulation_readouts()
 
     def _update_sensor_residuals(
         self,
@@ -744,6 +746,8 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
                     else 0xFF88FF88
                 )
             }
+        if hasattr(self, "_sync_simulation_readouts"):
+            self._sync_simulation_readouts()
 
     def _record_damage(self, vp: VehiclePass):
         stage = omni.usd.get_context().get_stage()
@@ -853,6 +857,8 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
                 lbl.style = _alert_style(a.level)
             else:
                 lbl.text = ""
+        if hasattr(self, "_sync_simulation_readouts"):
+            self._sync_simulation_readouts()
 
     def _publish_feedback(
         self,
