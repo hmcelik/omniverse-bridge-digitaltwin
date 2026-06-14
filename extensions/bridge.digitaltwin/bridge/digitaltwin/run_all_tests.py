@@ -136,6 +136,96 @@ def check_sensor_websocket_parser() -> None:
     assert fields["S0"] == "12.5", fields
     assert fields["S1"] == "-7.25", fields
 
+    fields = reader._parse_websocket_json(
+        '{"weight": 259, "pressure": 1757, "t": 48372, '
+        '"speed": 0.87, "strain0": 12.5}'
+    )
+    assert fields["P"] == "1", fields
+
+    state = sensor_reader._HWState()
+    times = iter([0.0, 0.10, 0.22])
+    original_monotonic = sensor_reader.time.monotonic
+    sensor_reader.time.monotonic = lambda: next(times)
+    try:
+        reader._process_frame(
+            reader._parse_websocket_json('{"weight": 0, "pressure": 1757}'),
+            state,
+        )
+        reader._process_frame(
+            reader._parse_websocket_json('{"weight": 259, "pressure": 1757}'),
+            state,
+        )
+        assert abs(state.last_speed_ms - 1.4) < 1e-9, state.last_speed_ms
+        assert reader.current_tick is None, reader.current_tick
+
+        reader._process_frame(
+            reader._parse_websocket_json('{"weight": 0, "pressure": 0}'),
+            state,
+        )
+        tick = reader.current_tick
+        assert tick is not None, tick
+        assert tick.in_transit, tick
+        assert tick.speed_ms is not None and abs(tick.speed_ms - 1.4) < 1e-9, tick
+        assert 0.0 <= tick.position_frac <= 1.0, tick
+        assert tick.weight_kg == 259.0, tick
+    finally:
+        sensor_reader.time.monotonic = original_monotonic
+
+    reader = sensor_reader.SensorReader(
+        sensor_reader.ConnectionConfig(mode="sim", gauge_channel_map={0: 1, 1: 5})
+    )
+    state = sensor_reader._HWState()
+    times = iter([10.00, 10.05, 10.10, 10.14, 10.35])
+    original_monotonic = sensor_reader.time.monotonic
+    sensor_reader.time.monotonic = lambda: next(times)
+    try:
+        reader._process_frame(
+            reader._parse_websocket_json(
+                '{"weight": 0, "pressure": 1000, "speed": 1.0}'
+            ),
+            state,
+        )
+        assert state.contact_start == 10.00, state.contact_start
+
+        reader._process_frame(
+            reader._parse_websocket_json(
+                '{"weight": 0, "pressure": 0, "speed": 1.0}'
+            ),
+            state,
+        )
+        assert reader.current_tick is None, reader.current_tick
+
+        reader._process_frame(
+            reader._parse_websocket_json(
+                '{"weight": 0, "pressure": 1200, "speed": 1.0}'
+            ),
+            state,
+        )
+        assert state.contact_start == 10.00, state.contact_start
+
+        reader._process_frame(
+            reader._parse_websocket_json(
+                '{"weight": 42, "pressure": 0, "speed": 1.0}'
+            ),
+            state,
+        )
+        assert state.peak_weight == 42.0, state.peak_weight
+        assert reader.current_tick is None, reader.current_tick
+
+        reader._process_frame(
+            reader._parse_websocket_json(
+                '{"weight": 0, "pressure": 0, "speed": 1.0}'
+            ),
+            state,
+        )
+        tick = reader.current_tick
+        assert tick is not None, tick
+        assert tick.in_transit, tick
+        assert tick.speed_ms == 1.0, tick
+        assert tick.weight_kg == 42.0, tick
+    finally:
+        sensor_reader.time.monotonic = original_monotonic
+
 
 def check_feedback_payload() -> None:
     sensor_reader = _import("sensor_reader")

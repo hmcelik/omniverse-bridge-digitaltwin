@@ -96,6 +96,11 @@ class ConnectionConfig:
     traffic_mode: str = TrafficMode.UNIFORM.value
     traffic_intensity_vpm: float = 12.0
     contact_length: float = 0.05   # metres -- pressure-sensor contact patch size
+    pressure_contact_threshold: float = 0.0
+    weight_contact_threshold: float = 0.0
+    pressure_to_weight_gap_m: float = 0.14
+    pressure_to_bridge_m: float = 0.30
+    min_vehicle_speed_ms: float = 0.05
     # Maps strain-gauge channel index -> global member index in the truss.
     # Channel 0 = S0 in ESP32 packet, channel 1 = S1, etc.
     # Set automatically by extension after structural capacity solve.
@@ -162,6 +167,8 @@ class VehiclePass:
 @dataclass
 class _HWState:
     contact_start: Optional[float] = None
+    bridge_start: Optional[float] = None
+    bridge_end: Optional[float] = None
     peak_weight: float = 0.0
     peak_pressure: float = 0.0
     peak_strains: Dict[int, float] = field(default_factory=dict)
@@ -170,6 +177,7 @@ class _HWState:
     crossing_id: Optional[str] = None
     metadata: Dict[str, object] = field(default_factory=dict)
     prev_contact: int = 0
+    prev_weight_contact: int = 0
 
 
 # Main reader class
@@ -486,7 +494,7 @@ class SensorReader:
         pressure = self._field_float(fields, "pressure", "pressure_raw", "raw_pressure")
         timestamp_ms = self._field_float(fields, "t", "timestamp", "timestamp_ms")
         crossing_id = fields.get("id") or fields.get("crossing_id")
-        if speed_ms is not None:
+        if speed_ms is not None and speed_ms > self.config.min_vehicle_speed_ms:
             state.last_speed_ms = speed_ms
         if timestamp_ms is not None:
             state.last_timestamp_ms = timestamp_ms
@@ -494,10 +502,16 @@ class SensorReader:
             state.crossing_id = str(crossing_id)
         if pressure is not None:
             state.peak_pressure = max(state.peak_pressure, pressure)
+        weight_contact = 1 if weight > self.config.weight_contact_threshold else 0
         state.metadata = {
             "raw_fields": dict(fields),
             "pressure_raw": pressure,
             "speed_ms": speed_ms,
+            "inferred_speed_ms": state.last_speed_ms,
+            "pressure_to_weight_gap_m": self.config.pressure_to_weight_gap_m,
+            "pressure_to_bridge_m": self.config.pressure_to_bridge_m,
+            "bridge_start": state.bridge_start,
+            "bridge_end": state.bridge_end,
         }
 
         # Read configured gauge channels
@@ -507,36 +521,104 @@ class SensorReader:
                 strains[m_idx] = float(fields.get(f"S{ch}", 0.0))
             except ValueError:
                 strains[m_idx] = 0.0
-        self._print_live_sensor_data(weight, contact, None, strains)
-
         now = time.monotonic()
 
-        if contact == 1 and state.prev_contact == 0:
-            # Rising edge -- vehicle enters contact zone
+        def schedule_bridge_start() -> None:
+            if state.contact_start is None or state.last_speed_ms is None:
+                return
+            speed = max(state.last_speed_ms, self.config.min_vehicle_speed_ms)
+            state.bridge_start = (
+                state.contact_start + self.config.pressure_to_bridge_m / speed
+            )
+            state.bridge_end = state.bridge_start + _SIM_BRIDGE_LEN_M / speed
+            state.metadata["bridge_start"] = state.bridge_start
+            state.metadata["bridge_end"] = state.bridge_end
+
+        if contact == 1 and state.prev_contact == 0 and state.contact_start is None:
+            # Rising pressure edge: the vehicle reached the first sensor. Keep
+            # later pulses from the same vehicle grouped in this active window.
             state.contact_start = now
+            state.bridge_start = None
+            state.bridge_end = None
             state.peak_weight   = weight
             state.peak_pressure = max(pressure or 0.0, 0.0)
             state.peak_strains  = {m: abs(v) for m, v in strains.items()}
+            if state.last_speed_ms is not None:
+                schedule_bridge_start()
+            with self._lock:
+                self._current_tick = None
 
-        if contact == 1 and state.contact_start is not None:
-            elapsed = now - state.contact_start
-            speed_for_pos = speed_ms or state.last_speed_ms or 0.5
-            pos = min(1.0, elapsed * speed_for_pos / max(_SIM_BRIDGE_LEN_M, 1e-9))
+        if (weight_contact == 1 and state.prev_weight_contact == 0
+                and state.contact_start is None
+                and state.last_speed_ms is not None):
+            # Fallback: if the tiny pressure pulse was missed but the weight
+            # sensor fires, reconstruct the pressure time from the known gap.
+            speed = max(state.last_speed_ms, self.config.min_vehicle_speed_ms)
+            state.contact_start = now - self.config.pressure_to_weight_gap_m / speed
+            state.bridge_start = None
+            state.bridge_end = None
+            state.peak_weight = weight
+            state.peak_pressure = max(pressure or 0.0, 0.0)
+            state.peak_strains = {m: abs(v) for m, v in strains.items()}
+            schedule_bridge_start()
+
+        if (weight_contact == 1 and state.prev_weight_contact == 0
+                and state.contact_start is not None):
+            # The weight sensor is 14 cm after the pressure sensor, so its
+            # rising edge can infer speed when the ESP is not already sending it.
+            if speed_ms is None and state.last_speed_ms is None:
+                sensor_dt = max(now - state.contact_start, 1e-6)
+                inferred_speed = self.config.pressure_to_weight_gap_m / sensor_dt
+                state.last_speed_ms = max(
+                    inferred_speed, self.config.min_vehicle_speed_ms)
+            if state.bridge_start is None:
+                schedule_bridge_start()
+            state.metadata["inferred_speed_ms"] = state.last_speed_ms
+
+        if state.contact_start is not None:
             state.peak_weight = max(state.peak_weight, weight)
             for m, v in strains.items():
                 state.peak_strains[m] = max(state.peak_strains.get(m, 0.0), abs(v))
-            with self._lock:
-                self._current_tick = SensorTick(
-                    weight_kg=weight, position_frac=pos,
-                    in_transit=True, strain_readings=dict(strains),
-                    speed_ms=speed_ms or state.last_speed_ms,
-                    pressure_raw=pressure,
-                    timestamp_ms=timestamp_ms or state.last_timestamp_ms,
-                    crossing_id=state.crossing_id,
-                    metadata=dict(state.metadata))
+            if state.bridge_start is None and state.last_speed_ms is not None:
+                schedule_bridge_start()
 
-        if contact == 0 and state.prev_contact == 1 and state.contact_start is not None:
-            # Falling edge -- vehicle exits contact zone
+        live_pos: Optional[float] = None
+        if state.bridge_start is not None and state.last_speed_ms is not None:
+            elapsed_on_bridge = now - state.bridge_start
+            if elapsed_on_bridge >= 0.0:
+                live_pos = min(
+                    1.0,
+                    elapsed_on_bridge * state.last_speed_ms
+                    / max(_SIM_BRIDGE_LEN_M, 1e-9),
+                )
+                with self._lock:
+                    self._current_tick = SensorTick(
+                        weight_kg=max(weight, state.peak_weight),
+                        position_frac=live_pos,
+                        in_transit=True, strain_readings=dict(strains),
+                        speed_ms=state.last_speed_ms,
+                        pressure_raw=pressure,
+                        timestamp_ms=timestamp_ms or state.last_timestamp_ms,
+                        crossing_id=state.crossing_id,
+                        metadata=dict(state.metadata))
+            else:
+                with self._lock:
+                    self._current_tick = None
+
+        self._print_live_sensor_data(weight, contact, live_pos, strains)
+
+        bridge_finished = (
+            live_pos is not None
+            and live_pos >= 1.0
+            and state.contact_start is not None
+        )
+        contact_finished_without_speed = (
+            contact == 0
+            and state.prev_contact == 1
+            and state.contact_start is not None
+            and state.last_speed_ms is None
+        )
+        if bridge_finished or contact_finished_without_speed:
             duration = max(now - state.contact_start, 1e-6)
             speed    = speed_ms or state.last_speed_ms or (
                 self.config.contact_length / duration)
@@ -562,12 +644,15 @@ class SensorReader:
                     metadata=dict(state.metadata))
                 self._latest = vp
             state.contact_start = None
+            state.bridge_start = None
+            state.bridge_end = None
             state.peak_pressure = 0.0
             state.last_speed_ms = None
             state.crossing_id = None
             state.metadata = {}
 
         state.prev_contact = contact
+        state.prev_weight_contact = weight_contact
 
 
     def _print_live_sensor_data(
@@ -646,13 +731,22 @@ class SensorReader:
                     return data[key]
             return default
 
-        contact = pick("P", "crossing", "contact", "in_transit", default=0)
+        pressure = pick("pressure", "pressure_raw", "raw_pressure", default="")
+        contact = pick("P", "crossing", "contact", "in_transit", default=None)
+        if contact is None:
+            try:
+                contact = (
+                    1 if float(pressure) > self.config.pressure_contact_threshold
+                    else 0
+                )
+            except (TypeError, ValueError):
+                contact = 0
         if isinstance(contact, bool):
             contact = 1 if contact else 0
         fields = {
             "W": str(pick("W", "weight", "weight_kg", "load", "mass")),
             "P": str(contact),
-            "pressure": str(pick("pressure", "pressure_raw", "raw_pressure", default="")),
+            "pressure": str(pressure),
             "speed": str(pick("speed", "speed_ms", "V", default="")),
             "t": str(pick("t", "timestamp", "timestamp_ms", default="")),
             "id": str(pick("id", "crossing_id", default="")),
