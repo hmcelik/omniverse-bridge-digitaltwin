@@ -18,7 +18,7 @@ from .bridge_config import (
     E_MODULUS, YIELD_STRENGTH, GRAVITY, MEMBER_AREA, MEMBER_I, BUCKLING_K,
     REAL_BRIDGE_LENGTH, REAL_TRUSS_WIDTH, NUM_PANELS,
     TRUSS_LENGTH, TRUSS_WIDTH, MEMBER_THICK, SCENE_SCALE,
-    V_MAX_PROTOTYPE,
+    V_MAX_PROTOTYPE, STRAIN_GAUGE_COUNT,
     SIM_WEIGHT_MIN_KG, SIM_WEIGHT_MAX_KG,
 )
 from .bridge_geometry import _define_box_mesh
@@ -31,6 +31,7 @@ class BridgeUIMixin:
 
     # UI
     def _build_ui(self):
+        gauge_field_hint = f"S0:<ue>...S{STRAIN_GAUGE_COUNT - 1}:<ue>"
         self._window = ui.Window("Bridge Digital Twin", width=420, height=660)
         with self._window.frame:
             with ui.VStack(spacing=6):
@@ -38,6 +39,28 @@ class BridgeUIMixin:
                 ui.Button("Load New Bridge", height=34,
                           clicked_fn=self._build_bridge,
                           style={"background_color": 0xFF2255AA})
+                ui.Separator(height=2)
+
+                with ui.VStack(spacing=3):
+                    with ui.HStack(height=22):
+                        ui.Label("Display:", width=70)
+                        self._mode_combo = ui.ComboBox(
+                            0, "Live stress", "Cumulative damage")
+                        self._mode_combo.model.add_item_changed_fn(
+                            lambda m, i: self._on_mode_change(m, i))
+                    with ui.HStack(height=22):
+                        ui.Label("Weight:", width=70)
+                        self._weight_mode_idx = self._weight_multiplier_to_index(
+                            getattr(self._conn_config, "weight_multiplier", 1.0))
+                        self._weight_mode_combo = ui.ComboBox(
+                            self._weight_mode_idx,
+                            "1x normal", "10x demo", "25x demo",
+                            "50x demo", "100x demo")
+                        self._weight_mode_combo.model.add_item_changed_fn(
+                            self._on_weight_mode_changed)
+                    with ui.HStack(height=28, spacing=6):
+                        ui.Button("Reset damage", height=26,
+                                  clicked_fn=self._on_reset_damage)
                 ui.Separator(height=2)
 
                 # --- Tab bar ---
@@ -58,16 +81,6 @@ class BridgeUIMixin:
 
                 with self._live_frame:
                     with ui.VStack(spacing=3):
-                        # Color mode row
-                        with ui.HStack(height=22):
-                            ui.Label("Color mode:", width=90)
-                            self._mode_combo = ui.ComboBox(0, "Live stress",
-                                                            "Cumulative damage")
-                            self._mode_combo.model.add_item_changed_fn(
-                                lambda m, i: self._on_mode_change(m, i))
-
-                        ui.Separator(height=4)
-
                         ui.Label("VEHICLE", style={"color": 0xFF888888})
                         with ui.HStack(height=18):
                             self._lbl_speed  = ui.Label("Speed: --")
@@ -103,8 +116,6 @@ class BridgeUIMixin:
                         ui.Separator(height=4)
 
                         with ui.HStack(height=28, spacing=6):
-                            ui.Button("Reset damage", height=26,
-                                      clicked_fn=self._on_reset_damage)
                             ui.Button("Connect WebSocket", height=26,
                                       clicked_fn=self._on_connect_websocket,
                                       style={"background_color": 0xFF2255AA})
@@ -133,6 +144,23 @@ class BridgeUIMixin:
                         self._lbl_feedback_status = ui.Label(
                             "Feedback: idle",
                             style={"color": 0xFF888888})
+                        with ui.Frame(
+                            height=104,
+                            style={
+                                "background_color": 0xFF1A1A1A,
+                                "border_color": 0xFF555555,
+                                "border_width": 1,
+                            },
+                        ):
+                            with ui.VStack(spacing=2):
+                                ui.Label("SENDING", style={"color": 0xFF888888})
+                                self._lbl_feedback_payload = ui.Label(
+                                    "maxLoad: --\n"
+                                    "safeToPass: --\n"
+                                    "twin1..4: --, --, --, --\n"
+                                    "averageStrainTwin: --",
+                                    style={"color": 0xFFCCCCCC},
+                                )
                         with ui.HStack(height=26, spacing=6):
                             ui.Button("Run full analysis now", height=24,
                                       clicked_fn=self._on_run_analysis_now,
@@ -214,6 +242,23 @@ class BridgeUIMixin:
                         self._sim_lbl_worst_crack = ui.Label(
                             "Crack: --", style={"color": 0xFF88FF88})
                         ui.Separator(height=3)
+                        ui.Label("OUTGOING DATA", style={"color": 0xFF888888})
+                        with ui.Frame(
+                            height=86,
+                            style={
+                                "background_color": 0xFF1A1A1A,
+                                "border_color": 0xFF555555,
+                                "border_width": 1,
+                            },
+                        ):
+                            self._sim_lbl_feedback_payload = ui.Label(
+                                "maxLoad: --\n"
+                                "safeToPass: --\n"
+                                "twin1..4: --, --, --, --\n"
+                                "averageStrainTwin: --",
+                                style={"color": 0xFFCCCCCC},
+                            )
+                        ui.Separator(height=3)
                         ui.Label("ALERTS", style={"color": 0xFF888888})
                         self._sim_alert_labels = [
                             ui.Label("", height=42, width=0)
@@ -278,10 +323,12 @@ class BridgeUIMixin:
                         ui.Separator(height=3)
                         ui.Label("Strain gauge channels -- attach sensors to these members:",
                                  style={"color": 0xFF888888})
-                        self._conn_gauge0_lbl = ui.Label("CH 0 -> member: build bridge first")
-                        self._conn_gauge1_lbl = ui.Label("CH 1 -> member: build bridge first")
+                        self._conn_gauge_labels = [
+                            ui.Label(f"CH {ch} -> member: build bridge first")
+                            for ch in range(STRAIN_GAUGE_COUNT)
+                        ]
                         ui.Label(
-                            "ESP32 packet format:  W:<kg>,P:<0|1>,S0:<ue>,S1:<ue>",
+                            f"ESP32 packet format:  W:<kg>,P:<0|1>,{gauge_field_hint}",
                             style={"color": 0xFF666666},
                         )
                         ui.Separator(height=3)
@@ -358,6 +405,7 @@ class BridgeUIMixin:
             ("_lbl_worst_damage", "_sim_lbl_worst_damage"),
             ("_lbl_passes", "_sim_lbl_passes"),
             ("_lbl_worst_crack", "_sim_lbl_worst_crack"),
+            ("_lbl_feedback_payload", "_sim_lbl_feedback_payload"),
         ]
         for src_name, dst_name in pairs:
             if hasattr(self, src_name) and hasattr(self, dst_name):
@@ -369,7 +417,9 @@ class BridgeUIMixin:
     def _on_mode_change(self, model, item):
         idx = model.get_item_value_model(item).as_int
         self._coloring_mode = "stress" if idx == 0 else "damage"
-        if self._last_fem:
+        if self._coloring_mode == "damage" and hasattr(self, "_apply_damage_colors"):
+            self._apply_damage_colors()
+        elif self._last_fem:
             self._apply_colors(self._last_fem)
 
     # Manual test tab (slider-driven, identical logic to original)
@@ -546,6 +596,18 @@ class BridgeUIMixin:
         ]
         return values[max(0, min(index, len(values) - 1))]
 
+    def _weight_multiplier_to_index(self, multiplier: float) -> int:
+        values = [1.0, 10.0, 25.0, 50.0, 100.0]
+        try:
+            nearest = min(values, key=lambda value: abs(value - float(multiplier)))
+            return values.index(nearest)
+        except (TypeError, ValueError):
+            return 0
+
+    def _weight_index_to_multiplier(self, index: int) -> float:
+        values = [1.0, 10.0, 25.0, 50.0, 100.0]
+        return values[max(0, min(index, len(values) - 1))]
+
     def _on_traffic_mode_changed(self, model, item) -> None:
         self._conn_traffic_idx = self._combo_item_index(
             model, item, getattr(self, "_conn_traffic_idx", 0))
@@ -554,6 +616,20 @@ class BridgeUIMixin:
             self._sensor.set_traffic_mode(mode)
         if hasattr(self, "_conn_config"):
             self._conn_config.traffic_mode = mode
+
+    def _on_weight_mode_changed(self, model, item) -> None:
+        self._weight_mode_idx = self._combo_item_index(
+            model, item, getattr(self, "_weight_mode_idx", 0))
+        multiplier = self._weight_index_to_multiplier(self._weight_mode_idx)
+        if hasattr(self, "_sensor"):
+            self._sensor.set_weight_multiplier(multiplier)
+        if hasattr(self, "_conn_config"):
+            self._conn_config.weight_multiplier = multiplier
+        if hasattr(self, "_sim_status_lbl"):
+            self._sim_status_lbl.text = (
+                "Simulation: weight mode "
+                f"{multiplier:g}x" + (
+                    " active" if getattr(self._sensor, "mode", "") == "sim" else " set"))
 
     def _on_bending_toggle(self, model) -> None:
         requested = model.get_value_as_bool()
@@ -638,6 +714,21 @@ class BridgeUIMixin:
         self._conn_env_lbl.text = (
             f"Env: {exposure} | RH: {rh_pct:.0f}% | yield -{kd_pct:.1f}%")
 
+    def _current_gauge_maps(self) -> tuple[dict[int, int], dict[int, float]]:
+        gauge_map = {
+            ch: m
+            for ch, m in enumerate(self._gauged_members[:STRAIN_GAUGE_COUNT])
+        }
+        span_map: dict[int, float] = {}
+        topo = getattr(self, "_topo", None)
+        if topo is not None:
+            for ch, m_idx in gauge_map.items():
+                try:
+                    span_map[ch] = topo.member_span_fraction(m_idx)
+                except Exception:
+                    pass
+        return gauge_map, span_map
+
     # Connection tab callback
     def _on_connect_websocket(self):
         self._conn_mode_idx = 0
@@ -648,8 +739,10 @@ class BridgeUIMixin:
         mode = ("websocket", "serial", "wifi")[mode_idx]
         traffic_mode = self._traffic_index_to_mode(
             getattr(self, "_conn_traffic_idx", 0))
+        weight_multiplier = self._weight_index_to_multiplier(
+            getattr(self, "_weight_mode_idx", 0))
 
-        gauge_map = {ch: m for ch, m in enumerate(self._gauged_members[:2])}
+        gauge_map, gauge_span_map = self._current_gauge_maps()
 
         config = ConnectionConfig(
             mode=mode,
@@ -659,7 +752,9 @@ class BridgeUIMixin:
             ws_url=self._conn_ws_url_field.model.get_value_as_string(),
             ws_basic_auth=self._conn_ws_auth_field.model.get_value_as_string(),
             traffic_mode=traffic_mode,
+            weight_multiplier=weight_multiplier,
             gauge_channel_map=gauge_map,
+            gauge_span_map=gauge_span_map,
         )
         self._conn_config = config
         self._sensor.set_traffic_mode(traffic_mode)
@@ -674,13 +769,17 @@ class BridgeUIMixin:
             self._sim_status_lbl.style = {"color": 0xFF888888}
 
     def _on_apply_simulation(self):
-        gauge_map = {ch: m for ch, m in enumerate(self._gauged_members[:2])}
+        gauge_map, gauge_span_map = self._current_gauge_maps()
         traffic_mode = self._traffic_index_to_mode(
             getattr(self, "_conn_traffic_idx", 0))
+        weight_multiplier = self._weight_index_to_multiplier(
+            getattr(self, "_weight_mode_idx", 0))
         config = ConnectionConfig(
             mode="sim",
             traffic_mode=traffic_mode,
+            weight_multiplier=weight_multiplier,
             gauge_channel_map=gauge_map,
+            gauge_span_map=gauge_span_map,
         )
         self._conn_config = config
         self._sensor.reconfigure(config)
@@ -694,7 +793,8 @@ class BridgeUIMixin:
                 TrafficMode.RUSH_HOUR.value: "Rush hour",
             }
             self._sim_status_lbl.text = (
-                f"Simulation: running ({labels.get(traffic_mode, traffic_mode)})")
+                f"Simulation: running ({labels.get(traffic_mode, traffic_mode)}, "
+                f"{weight_multiplier:g}x)")
             self._sim_status_lbl.style = {"color": 0xFF88FF88}
 
     # Button callbacks
@@ -716,7 +816,9 @@ class BridgeUIMixin:
 
     def _on_reset_damage(self):
         self._damage.reset()
-        if self._last_fem:
+        if self._coloring_mode == "damage" and hasattr(self, "_apply_damage_colors"):
+            self._apply_damage_colors()
+        elif self._last_fem:
             self._apply_colors(self._last_fem)
         for lbl in self._alert_labels:
             lbl.text = ""
@@ -736,13 +838,19 @@ class BridgeUIMixin:
     def _on_simulate_pass(self):
         rng = random.Random()
         raw_weight = rng.uniform(SIM_WEIGHT_MIN_KG, SIM_WEIGHT_MAX_KG)
+        multiplier = self._weight_index_to_multiplier(
+            getattr(self, "_weight_mode_idx", 0))
         speed  = rng.uniform(0.3, 1.2)
         axle   = rng.uniform(0.2, 0.8)
         vp = VehiclePass(
-            weight_kg=raw_weight * _daf_calibrated(speed),
+            weight_kg=raw_weight * multiplier * _daf_calibrated(speed),
             speed_ms=speed,
             axle_position_frac=axle,
             strain_readings={},
+            metadata={
+                "raw_weight_kg": raw_weight,
+                "weight_multiplier": multiplier,
+            },
         )
         self._record_damage(vp)
 
@@ -751,12 +859,18 @@ class BridgeUIMixin:
         # Enqueue a synthetic representative pass so the worker has something to analyse
         rng = random.Random()
         raw = rng.uniform(SIM_WEIGHT_MIN_KG, SIM_WEIGHT_MAX_KG)
+        multiplier = self._weight_index_to_multiplier(
+            getattr(self, "_weight_mode_idx", 0))
         spd = rng.uniform(0.4, 1.0)
         vp  = VehiclePass(
-            weight_kg=raw * _daf_calibrated(spd),
+            weight_kg=raw * multiplier * _daf_calibrated(spd),
             speed_ms=spd,
             axle_position_frac=0.5,
             strain_readings={},
+            metadata={
+                "raw_weight_kg": raw,
+                "weight_multiplier": multiplier,
+            },
         )
         if self._last_fem:
             load_n = vp.weight_kg * GRAVITY

@@ -30,11 +30,13 @@ try:
     from .bridge_config import (
         REAL_BRIDGE_LENGTH, V_MAX_PROTOTYPE,
         SIM_WEIGHT_MIN_KG, SIM_WEIGHT_MAX_KG,
+        STRAIN_GAUGE_COUNT,
     )
 except ImportError:
     from bridge_config import (  # type: ignore[no-redef]
         REAL_BRIDGE_LENGTH, V_MAX_PROTOTYPE,
         SIM_WEIGHT_MIN_KG, SIM_WEIGHT_MAX_KG,
+        STRAIN_GAUGE_COUNT,
     )
 
 _SIM_BRIDGE_LEN_M = REAL_BRIDGE_LENGTH  # metres
@@ -95,6 +97,7 @@ class ConnectionConfig:
             "ESP32_BASIC_AUTH", "melih:digitaltwin"))
     traffic_mode: str = TrafficMode.UNIFORM.value
     traffic_intensity_vpm: float = 12.0
+    weight_multiplier: float = 1.0
     contact_length: float = 0.05   # metres -- pressure-sensor contact patch size
     pressure_contact_threshold: float = 0.0
     weight_contact_threshold: float = 0.0
@@ -104,7 +107,12 @@ class ConnectionConfig:
     # Maps strain-gauge channel index -> global member index in the truss.
     # Channel 0 = S0 in ESP32 packet, channel 1 = S1, etc.
     # Set automatically by extension after structural capacity solve.
-    gauge_channel_map: Dict[int, int] = field(default_factory=lambda: {0: 1, 1: 5})
+    gauge_channel_map: Dict[int, int] = field(
+        default_factory=lambda: {ch: ch for ch in range(STRAIN_GAUGE_COUNT)}
+    )
+    # Channel -> member midpoint fraction along the bridge span, for simulated
+    # strain influence lines.
+    gauge_span_map: Dict[int, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -115,17 +123,29 @@ class FeedbackCommand:
     alert_level: str = "INFO"
     reason: str = ""
     timestamp_utc: str = ""
+    strain_values: List[float] = field(default_factory=list)
+    strain_value: Optional[float] = None
+    safe_to_pass: bool = True
+    # Legacy name accepted so older callers/tests do not silently lose values.
+    stress_values: List[float] = field(default_factory=list)
 
     def payload(self) -> dict:
-        ts = self.timestamp_utc or time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        strains = list((self.strain_values or self.stress_values)[:4])
+        while len(strains) < 4:
+            strains.append(0.0)
+        average_strain = (
+            float(self.strain_value)
+            if self.strain_value is not None
+            else sum(strains) / len(strains)
+        )
         return {
             "maxLoad": self.max_load_kg,
-            "safeSpeed": self.safe_speed_ms,
-            "advisory": self.advisory,
-            "alertLevel": self.alert_level,
-            "reason": self.reason,
-            "timestamp": ts,
+            "safeToPass": 1 if self.safe_to_pass else 0,
+            "twin1": strains[0],
+            "twin2": strains[1],
+            "twin3": strains[2],
+            "twin4": strains[3],
+            "averageStrainTwin": average_strain,
         }
 
 
@@ -170,6 +190,7 @@ class _HWState:
     bridge_start: Optional[float] = None
     bridge_end: Optional[float] = None
     peak_weight: float = 0.0
+    peak_raw_weight: float = 0.0
     peak_pressure: float = 0.0
     peak_strains: Dict[int, float] = field(default_factory=dict)
     last_speed_ms: Optional[float] = None
@@ -331,8 +352,10 @@ class SensorReader:
 
         # If caller supplied legacy monitored_members, build a default gauge map.
         if monitored_members is not None and not config.gauge_channel_map:
-            config.gauge_channel_map = {i: m for i, m in
-                                         enumerate(monitored_members[:4])}
+            config.gauge_channel_map = {
+                i: m
+                for i, m in enumerate(monitored_members[:STRAIN_GAUGE_COUNT])
+            }
 
         self._lock          = threading.Lock()
         self._latest:        Optional[VehiclePass] = None
@@ -451,6 +474,17 @@ class SensorReader:
     def set_traffic_intensity(self, vpm: float) -> None:
         self.config.traffic_intensity_vpm = max(0.1, float(vpm))
 
+    def set_weight_multiplier(self, multiplier: float) -> None:
+        allowed = (1.0, 10.0, 25.0, 50.0, 100.0)
+        self.config.weight_multiplier = min(
+            allowed, key=lambda value: abs(value - float(multiplier)))
+
+    def set_gauge_span_map(self, span_map: Dict[int, float]) -> None:
+        self.config.gauge_span_map = {
+            int(ch): max(0.0, min(1.0, float(frac)))
+            for ch, frac in span_map.items()
+        }
+
     def update_daf_calibration(self, speed_ms: float, measured_daf: float) -> None:
         key = round(speed_ms, 1)
         # Exponential moving average: 80% old, 20% new -- avoids single-outlier jumps
@@ -485,10 +519,12 @@ class SensorReader:
 
     def _process_frame(self, fields: Dict[str, str], state: _HWState) -> None:
         try:
-            weight  = float(fields.get("W", 0))
+            raw_weight = float(fields.get("W", 0))
             contact = int(fields.get("P", 0))
         except ValueError:
             return
+        weight_multiplier = max(1.0, float(self.config.weight_multiplier))
+        weight = raw_weight * weight_multiplier
 
         speed_ms = self._field_float(fields, "speed", "V", "speed_ms")
         pressure = self._field_float(fields, "pressure", "pressure_raw", "raw_pressure")
@@ -502,9 +538,12 @@ class SensorReader:
             state.crossing_id = str(crossing_id)
         if pressure is not None:
             state.peak_pressure = max(state.peak_pressure, pressure)
-        weight_contact = 1 if weight > self.config.weight_contact_threshold else 0
+        weight_contact = (
+            1 if raw_weight > self.config.weight_contact_threshold else 0)
         state.metadata = {
             "raw_fields": dict(fields),
+            "raw_weight_kg": raw_weight,
+            "weight_multiplier": weight_multiplier,
             "pressure_raw": pressure,
             "speed_ms": speed_ms,
             "inferred_speed_ms": state.last_speed_ms,
@@ -541,6 +580,7 @@ class SensorReader:
             state.bridge_start = None
             state.bridge_end = None
             state.peak_weight   = weight
+            state.peak_raw_weight = raw_weight
             state.peak_pressure = max(pressure or 0.0, 0.0)
             state.peak_strains  = {m: abs(v) for m, v in strains.items()}
             if state.last_speed_ms is not None:
@@ -558,6 +598,7 @@ class SensorReader:
             state.bridge_start = None
             state.bridge_end = None
             state.peak_weight = weight
+            state.peak_raw_weight = raw_weight
             state.peak_pressure = max(pressure or 0.0, 0.0)
             state.peak_strains = {m: abs(v) for m, v in strains.items()}
             schedule_bridge_start()
@@ -577,6 +618,7 @@ class SensorReader:
 
         if state.contact_start is not None:
             state.peak_weight = max(state.peak_weight, weight)
+            state.peak_raw_weight = max(state.peak_raw_weight, raw_weight)
             for m, v in strains.items():
                 state.peak_strains[m] = max(state.peak_strains.get(m, 0.0), abs(v))
             if state.bridge_start is None and state.last_speed_ms is not None:
@@ -592,6 +634,8 @@ class SensorReader:
                     / max(_SIM_BRIDGE_LEN_M, 1e-9),
                 )
                 with self._lock:
+                    metadata = dict(state.metadata)
+                    metadata["raw_weight_kg"] = state.peak_raw_weight
                     self._current_tick = SensorTick(
                         weight_kg=max(weight, state.peak_weight),
                         position_frac=live_pos,
@@ -600,10 +644,26 @@ class SensorReader:
                         pressure_raw=pressure,
                         timestamp_ms=timestamp_ms or state.last_timestamp_ms,
                         crossing_id=state.crossing_id,
-                        metadata=dict(state.metadata))
+                        metadata=metadata)
             else:
                 with self._lock:
-                    self._current_tick = None
+                    approach_weight = max(weight, state.peak_weight)
+                    if approach_weight > 0.0:
+                        metadata = dict(state.metadata)
+                        metadata["raw_weight_kg"] = state.peak_raw_weight
+                        metadata["phase"] = "approach"
+                        self._current_tick = SensorTick(
+                            weight_kg=approach_weight,
+                            position_frac=0.0,
+                            in_transit=True,
+                            strain_readings=dict(strains),
+                            speed_ms=state.last_speed_ms,
+                            pressure_raw=pressure,
+                            timestamp_ms=timestamp_ms or state.last_timestamp_ms,
+                            crossing_id=state.crossing_id,
+                            metadata=metadata)
+                    else:
+                        self._current_tick = None
 
         self._print_live_sensor_data(weight, contact, live_pos, strains)
 
@@ -631,7 +691,10 @@ class SensorReader:
                 pressure_raw=state.peak_pressure or pressure,
                 timestamp_ms=timestamp_ms or state.last_timestamp_ms,
                 crossing_id=state.crossing_id,
-                metadata=dict(state.metadata),
+                metadata={
+                    **dict(state.metadata),
+                    "raw_weight_kg": state.peak_raw_weight,
+                },
             )
             with self._lock:
                 self._current_tick = SensorTick(
@@ -646,6 +709,7 @@ class SensorReader:
             state.contact_start = None
             state.bridge_start = None
             state.bridge_end = None
+            state.peak_raw_weight = 0.0
             state.peak_pressure = 0.0
             state.last_speed_ms = None
             state.crossing_id = None
@@ -675,7 +739,7 @@ class SensorReader:
         with self._lock:
             self._current_tick = None
         while not self._stop_event.wait(timeout=1.0):
-            pass
+            self._send_pending_feedback()
 
     def _websocket_loop(self) -> None:
         state = _HWState()
@@ -751,8 +815,13 @@ class SensorReader:
             "t": str(pick("t", "timestamp", "timestamp_ms", default="")),
             "id": str(pick("id", "crossing_id", default="")),
         }
+        lower_keys = {str(k).lower() for k in data}
+        zero_based_strains = any(
+            key in lower_keys for key in ("s0", "strain0")
+        )
         for ch in self.config.gauge_channel_map:
-            fields[f"S{ch}"] = str(pick(f"S{ch}", f"strain{ch}", default=0))
+            strain_name = f"strain{ch if zero_based_strains else ch + 1}"
+            fields[f"S{ch}"] = str(pick(f"S{ch}", strain_name, default=0))
         return fields
 
     def _send_pending_max_load(self) -> None:
@@ -772,7 +841,7 @@ class SensorReader:
             self._feedback_status.attempts += 1
             self._feedback_status.last_payload = dict(payload_dict)
 
-        url = self.config.ws_url.rstrip("/") + "/set-limit"
+        url = self.config.ws_url.rstrip("/") + "/set-data"
         payload = json.dumps(payload_dict).encode("utf-8")
         req = request.Request(
             url,
@@ -923,6 +992,8 @@ class SensorReader:
         rng = random.Random()
 
         while not self._stop_event.is_set():
+            self._send_pending_feedback()
+
             # Block here while paused; stop() sets the event to unblock us.
             if not self._sim_pause_event.is_set():
                 with self._lock:
@@ -931,14 +1002,22 @@ class SensorReader:
                 continue   # re-check _stop_event
 
             sample = self._sample_traffic(rng)
-            self._stop_event.wait(timeout=sample.wait_s)
+            wait_until = time.monotonic() + sample.wait_s
+            while not self._stop_event.is_set():
+                remaining = wait_until - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                self._send_pending_feedback()
+                self._stop_event.wait(timeout=min(0.5, remaining))
             if self._stop_event.is_set():
                 break
 
             raw_weight = sample.raw_weight_kg
+            weight_multiplier = max(1.0, float(self.config.weight_multiplier))
+            effective_raw_weight = raw_weight * weight_multiplier
             speed      = sample.speed_ms
             daf        = _daf_calibrated(speed)   # uses calibrated table if available
-            weight     = raw_weight * daf
+            weight     = effective_raw_weight * daf
 
             n_steps     = max(3, int((_SIM_BRIDGE_LEN_M / speed) / _SIM_TICK_DT))
             peak_strains: Dict[int, float] = {}
@@ -951,28 +1030,33 @@ class SensorReader:
                 # Influence-line strain per gauged member
                 strain_readings: Dict[int, float] = {}
                 for ch, m_idx in self.config.gauge_channel_map.items():
-                    # Normalise member index to a span-fraction proxy.
-                    # Assumes members are numbered roughly along the span.
+                    # Use the actual gauged member midpoint when the bridge
+                    # topology has provided it; fall back to channel spacing.
                     n_mem = max(1, len(self.config.gauge_channel_map))
-                    span_frac = ch / max(n_mem - 1, 1)
+                    span_frac = self.config.gauge_span_map.get(
+                        ch, ch / max(n_mem - 1, 1))
                     dist      = abs(span_frac - pos)
                     envelope  = math.cos(math.pi * min(dist, 0.5) * 2.0) ** 2
-                    base      = raw_weight * 50.0   # rough microstrain per kg
+                    base      = effective_raw_weight * 50.0
                     noise     = rng.gauss(0.0, base * 0.03)
                     val       = max(0.0, base * envelope + noise)
                     strain_readings[m_idx] = val
                     peak_strains[m_idx]    = max(peak_strains.get(m_idx, 0.0), val)
 
-                still_on = step < n_steps
+                still_on = True
                 with self._lock:
                     self._current_tick = SensorTick(
                         weight_kg=weight, position_frac=pos,
                         in_transit=still_on, strain_readings=strain_readings,
-                        speed_ms=speed)
+                        speed_ms=speed,
+                        metadata={
+                            "raw_weight_kg": raw_weight,
+                            "weight_multiplier": weight_multiplier,
+                        })
                 self._print_live_sensor_data(
-                    weight, 1 if still_on else 0, pos, strain_readings)
+                    weight, 1, pos, strain_readings)
 
-                if still_on:
+                if step < n_steps:
                     self._stop_event.wait(timeout=_SIM_TICK_DT)
 
             with self._lock:
@@ -980,6 +1064,8 @@ class SensorReader:
                     weight_kg=weight, speed_ms=speed,
                     axle_position_frac=0.5, strain_readings=peak_strains,
                     metadata={
+                        "raw_weight_kg": raw_weight,
+                        "weight_multiplier": weight_multiplier,
                         "vehicle_class": sample.vehicle_class,
                         "equivalent_full_scale_kg": sample.equivalent_full_scale_kg,
                     })

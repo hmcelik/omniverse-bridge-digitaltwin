@@ -21,11 +21,13 @@ try:
     from .bridge_config import (
         FATIGUE_DETAIL_CATEGORY_PA, FATIGUE_EXPONENT, FATIGUE_LIMIT_PA,
         PARIS_C, PARIS_M, FRACTURE_TOUGHNESS_KIC, CRACK_A0, CRACK_F,
+        YIELD_STRENGTH,
     )
 except ImportError:
     from bridge_config import (  # type: ignore[no-redef]
         FATIGUE_DETAIL_CATEGORY_PA, FATIGUE_EXPONENT, FATIGUE_LIMIT_PA,
         PARIS_C, PARIS_M, FRACTURE_TOUGHNESS_KIC, CRACK_A0, CRACK_F,
+        YIELD_STRENGTH,
     )
 
 _DETAIL_CATEGORY_PA = FATIGUE_DETAIL_CATEGORY_PA
@@ -36,6 +38,7 @@ _PARIS_M            = PARIS_M
 _KIC_PA_SQRT_M      = FRACTURE_TOUGHNESS_KIC
 _CRACK_A0_M         = CRACK_A0
 _CRACK_F            = CRACK_F
+_YIELD_STRENGTH_PA  = YIELD_STRENGTH
 
 
 class DamageState(str, Enum):
@@ -91,6 +94,17 @@ def _grow_crack_closed_form(a0_m: float, stress_pa: float, n_cycles: float) -> f
     if term <= 0.0:
         return math.inf
     return term ** (1.0 / exponent)
+
+
+def _overload_damage_increment(stress_pa: float) -> float:
+    ratio = abs(stress_pa) / max(_YIELD_STRENGTH_PA, 1e-9)
+    if ratio <= 0.90:
+        return 0.0
+    if ratio <= 1.0:
+        t = (ratio - 0.90) / 0.10
+        return 0.05 * t * t
+    t = min((ratio - 1.0) / 0.50, 1.0)
+    return 0.05 + 0.45 * t * t
 
 
 class DamageModel:
@@ -177,6 +191,12 @@ class DamageModel:
                 # Track the fast-path increment so accurate path can correct it
                 self._simple_increments[m_idx] = (
                     self._simple_increments.get(m_idx, 0.0) + inc
+                )
+            overload_inc = _overload_damage_increment(s)
+            if overload_inc > 0.0:
+                self._damage[m_idx] = self._damage.get(m_idx, 0.0) + overload_inc
+                self._simple_increments[m_idx] = (
+                    self._simple_increments.get(m_idx, 0.0) + overload_inc
                 )
         self._pass_count += 1
         if member_stresses:
@@ -314,6 +334,20 @@ class DamageModel:
     def all_crack_ratios(self) -> Dict[int, float]:
         return {i: self.get_crack_ratio(i) for i in range(self._n)}
 
+    def residual_capacity_factor(self) -> float:
+        """Return a conservative residual strength factor from damage/cracks."""
+        worst_d = max(self._damage.values(), default=0.0)
+        worst_crack = max(self.all_crack_ratios().values(), default=0.0)
+
+        # Fatigue damage alone leaves a 40% residual at D >= 1.0, matching the
+        # existing residual-strength assumption used by the extension.
+        damage_factor = max(0.1, 1.0 - min(worst_d, 1.0) * 0.6)
+
+        # Crack ratio is more brittle: at critical crack size, residual capacity
+        # should be near zero even if Miner's D is still numerically small.
+        crack_factor = max(0.05, 1.0 - min(worst_crack, 1.0) * 0.95)
+        return min(damage_factor, crack_factor)
+
 
 # Self-test
 def run_self_test(verbose: bool = True) -> None:
@@ -375,7 +409,16 @@ def run_self_test(verbose: bool = True) -> None:
     if verbose:
         print("  Damage states: OK")
 
-    # 5. Paris crack growth
+    # 5. Plastic overload penalty
+    overload_model = DamageModel(n_members=2)
+    overload_model.record_pass_simple({0: 0.95 * _YIELD_STRENGTH_PA}, n_cycles=1)
+    overload_model.record_pass_simple({1: 1.20 * _YIELD_STRENGTH_PA}, n_cycles=1)
+    assert 0.0 < overload_model.get_damage(0) < 0.05
+    assert overload_model.get_damage(1) > 0.10
+    if verbose:
+        print("  Plastic overload penalty: OK")
+
+    # 6. Paris crack growth
     crack_model = DamageModel(n_members=2)
     crack_model.record_pass_simple({0: 100e6, 1: 60e6}, n_cycles=600_000)
     high_ratio = crack_model.get_crack_ratio(0)
@@ -385,11 +428,17 @@ def run_self_test(verbose: bool = True) -> None:
     assert low_ratio < 0.5, (
         f"60 MPa crack should grow much slower, ratio={low_ratio:.3f}")
     assert crack_model.get_state(0) == DamageState.FRACTURE
+    assert crack_model.residual_capacity_factor() <= 0.06
+    crack_only = DamageModel(n_members=1)
+    crack_only._crack_sizes[0] = 0.5
+    crack_only._max_stress_seen[0] = _KIC_PA_SQRT_M / _CRACK_F / math.sqrt(
+        math.pi)
+    assert 0.5 < crack_only.residual_capacity_factor() < 0.6
     if verbose:
         print(f"  Paris crack growth: OK "
               f"(100 MPa ratio={high_ratio:.2f}, 60 MPa ratio={low_ratio:.3f})")
 
-    # 6. Crack persistence round-trip
+    # 7. Crack persistence round-trip
     path.unlink(missing_ok=True)
     crack_model_persist = DamageModel(n_members=1, json_path=path)
     crack_model_persist.record_pass_simple({0: 100e6}, n_cycles=600_000)
@@ -400,7 +449,7 @@ def run_self_test(verbose: bool = True) -> None:
     if verbose:
         print("  Crack JSON persistence: OK")
 
-    # 7. Reset
+    # 8. Reset
     model2.reset()
     assert model2.get_damage(0) == 0.0
     assert abs(model2.get_crack_size(0) - _CRACK_A0_M) < 1e-15

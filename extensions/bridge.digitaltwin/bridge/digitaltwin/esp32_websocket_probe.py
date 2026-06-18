@@ -2,7 +2,8 @@
 #
 # This file is intentionally isolated from the extension runtime. Use it to verify
 # that the public ESP32/ngrok endpoint sends JSON readings over /ws and accepts
-# maxLoad updates over /set-limit before wiring the transport into SensorReader.
+# bridge feedback updates over /set-data before wiring the transport into
+# SensorReader.
 
 from __future__ import annotations
 
@@ -199,9 +200,18 @@ class MinimalWebSocket:
         return bytes(data)
 
 
-def post_max_load(base_url: str, max_load: float, basic_auth: Optional[str]) -> int:
-    url = base_url.rstrip("/") + "/set-limit"
-    payload = json.dumps({"maxLoad": max_load}).encode("utf-8")
+def post_bridge_data(base_url: str, max_load: float,
+                     basic_auth: Optional[str]) -> int:
+    url = base_url.rstrip("/") + "/set-data"
+    payload = json.dumps({
+        "maxLoad": max_load,
+        "safeToPass": 1,
+        "twin1": 0.0,
+        "twin2": 0.0,
+        "twin3": 0.0,
+        "twin4": 0.0,
+        "averageStrainTwin": 0.0,
+    }).encode("utf-8")
     req = request.Request(
         url,
         data=payload,
@@ -239,8 +249,8 @@ def run_probe(
     ws.send_text("getReadings")
 
     if max_load is not None:
-        status = post_max_load(base_url, max_load, basic_auth)
-        print(f"POST /set-limit maxLoad={max_load:g} -> HTTP {status}")
+        status = post_bridge_data(base_url, max_load, basic_auth)
+        print(f"POST /set-data maxLoad={max_load:g} -> HTTP {status}")
 
     deadline = time.monotonic() + duration
     try:
@@ -248,8 +258,8 @@ def run_probe(
             now = time.monotonic()
             if random_max_load and now >= next_send_at:
                 value = random.randint(20, 120)
-                status = post_max_load(base_url, value, basic_auth)
-                print(f"POST /set-limit random maxLoad={value} -> HTTP {status}")
+                status = post_bridge_data(base_url, value, basic_auth)
+                print(f"POST /set-data random maxLoad={value} -> HTTP {status}")
                 next_send_at = now + send_interval
 
             remaining = max(0.1, deadline - time.monotonic())

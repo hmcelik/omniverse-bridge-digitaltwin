@@ -100,6 +100,7 @@ class SafetyChecker:
         resonance_detected: bool = False,
         env_yield_knockdown: float = 0.0,       # fraction (0-1)
         fast_vs_accurate_error: Optional[float] = None,  # fraction deviation
+        log_alerts: bool = True,
     ) -> List[Alert]:
         eff_load_limit  = safe_load_kg if safe_load_kg is not None else self.safe_load_kg
         eff_speed_limit = safe_speed   if safe_speed   is not None else self._speed_limit(damage)
@@ -197,7 +198,8 @@ class SafetyChecker:
             ))
 
         alerts.sort(key=lambda a: (-int(a.level), a.member_index is None))
-        self._log(alerts, vehicle)
+        if log_alerts:
+            self._log(alerts, vehicle)
         return alerts
 
     def _speed_limit(self, damage: DamageModel) -> float:

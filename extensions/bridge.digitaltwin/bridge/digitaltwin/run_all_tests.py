@@ -117,15 +117,66 @@ def check_sensor_traffic_spectrum() -> None:
     _import("sensor_reader").run_self_test()
 
 
+def check_sensor_weight_multiplier() -> None:
+    sensor_reader = _import("sensor_reader")
+    reader = sensor_reader.SensorReader(sensor_reader.ConnectionConfig(mode="sim"))
+    reader.set_weight_multiplier(10.0)
+    assert reader.config.weight_multiplier == 10.0
+    reader.set_weight_multiplier(100.0)
+    assert reader.config.weight_multiplier == 100.0
+    reader.set_weight_multiplier(10.0)
+
+    state = sensor_reader._HWState()
+    times = iter([0.00, 0.35, 0.85])
+    original_monotonic = sensor_reader.time.monotonic
+    sensor_reader.time.monotonic = lambda: next(times)
+    try:
+        reader._process_frame(
+            reader._parse_websocket_json(
+                '{"weight": 2, "pressure": 1000, "speed": 1.0}'
+            ),
+            state,
+        )
+        reader._process_frame(
+            reader._parse_websocket_json(
+                '{"weight": 2, "pressure": 0, "speed": 1.0}'
+            ),
+            state,
+        )
+        tick = reader.current_tick
+        assert tick is not None, tick
+        assert tick.weight_kg == 20.0, tick
+        assert tick.metadata["raw_weight_kg"] == 2.0, tick.metadata
+        assert tick.metadata["weight_multiplier"] == 10.0, tick.metadata
+
+        reader._process_frame(
+            reader._parse_websocket_json(
+                '{"weight": 0, "pressure": 0, "speed": 1.0}'
+            ),
+            state,
+        )
+        vp = reader.latest_pass
+        assert vp is not None, vp
+        assert vp.weight_kg > 20.0, vp
+        assert vp.metadata["raw_weight_kg"] == 2.0, vp.metadata
+        assert vp.metadata["weight_multiplier"] == 10.0, vp.metadata
+    finally:
+        sensor_reader.time.monotonic = original_monotonic
+
+
 def check_sensor_websocket_parser() -> None:
     sensor_reader = _import("sensor_reader")
     reader = sensor_reader.SensorReader(
-        sensor_reader.ConnectionConfig(mode="sim", gauge_channel_map={0: 1, 1: 5})
+        sensor_reader.ConnectionConfig(
+            mode="sim",
+            gauge_channel_map={0: 1, 1: 5, 2: 9, 3: 13},
+        )
     )
     fields = reader._parse_websocket_json(
         '{"weight": 259, "pressure": 1757, "t": 48372, '
         '"speed": 0.87, "crossing": 1, "strain0": 12.5, '
-        '"strain1": -7.25, "id": "abc"}'
+        '"strain1": -7.25, "strain2": 4.5, "strain3": 9.75, '
+        '"id": "abc"}'
     )
     assert fields["W"] == "259", fields
     assert fields["P"] == "1", fields
@@ -135,6 +186,19 @@ def check_sensor_websocket_parser() -> None:
     assert fields["id"] == "abc", fields
     assert fields["S0"] == "12.5", fields
     assert fields["S1"] == "-7.25", fields
+    assert fields["S2"] == "4.5", fields
+    assert fields["S3"] == "9.75", fields
+
+    fields = reader._parse_websocket_json(
+        '{"weight": 259, "pressure": 1757, "t": 48372, '
+        '"speed": 0.87, "strain1": 12.5, '
+        '"strain2": -7.25, "strain3": 4.5, "strain4": 9.75, '
+        '"id": "abc"}'
+    )
+    assert fields["S0"] == "12.5", fields
+    assert fields["S1"] == "-7.25", fields
+    assert fields["S2"] == "4.5", fields
+    assert fields["S3"] == "9.75", fields
 
     fields = reader._parse_websocket_json(
         '{"weight": 259, "pressure": 1757, "t": 48372, '
@@ -156,7 +220,12 @@ def check_sensor_websocket_parser() -> None:
             state,
         )
         assert abs(state.last_speed_ms - 1.4) < 1e-9, state.last_speed_ms
-        assert reader.current_tick is None, reader.current_tick
+        tick = reader.current_tick
+        assert tick is not None, tick
+        assert tick.in_transit, tick
+        assert tick.position_frac == 0.0, tick
+        assert tick.weight_kg == 259.0, tick
+        assert tick.metadata.get("phase") == "approach", tick.metadata
 
         reader._process_frame(
             reader._parse_websocket_json('{"weight": 0, "pressure": 0}'),
@@ -172,7 +241,10 @@ def check_sensor_websocket_parser() -> None:
         sensor_reader.time.monotonic = original_monotonic
 
     reader = sensor_reader.SensorReader(
-        sensor_reader.ConnectionConfig(mode="sim", gauge_channel_map={0: 1, 1: 5})
+        sensor_reader.ConnectionConfig(
+            mode="sim",
+            gauge_channel_map={0: 1, 1: 5, 2: 9, 3: 13},
+        )
     )
     state = sensor_reader._HWState()
     times = iter([10.00, 10.05, 10.10, 10.14, 10.35])
@@ -210,7 +282,11 @@ def check_sensor_websocket_parser() -> None:
             state,
         )
         assert state.peak_weight == 42.0, state.peak_weight
-        assert reader.current_tick is None, reader.current_tick
+        tick = reader.current_tick
+        assert tick is not None, tick
+        assert tick.position_frac == 0.0, tick
+        assert tick.weight_kg == 42.0, tick
+        assert tick.metadata.get("phase") == "approach", tick.metadata
 
         reader._process_frame(
             reader._parse_websocket_json(
@@ -236,13 +312,26 @@ def check_feedback_payload() -> None:
         alert_level="WARNING",
         reason="test warning",
         timestamp_utc="2026-06-09T00:00:00Z",
+        strain_values=[70.0, -140.0, 210.0, 280.0],
+        safe_to_pass=False,
     )
     payload = cmd.payload()
     assert payload["maxLoad"] == 4.2
-    assert payload["safeSpeed"] == 0.7
-    assert payload["advisory"] == "reduce_speed"
-    assert payload["alertLevel"] == "WARNING"
-    assert payload["reason"] == "test warning"
+    assert payload["safeToPass"] == 0
+    assert payload["twin1"] == 70.0
+    assert payload["twin2"] == -140.0
+    assert payload["twin3"] == 210.0
+    assert payload["twin4"] == 280.0
+    assert payload["averageStrainTwin"] == 105.0
+
+    legacy = sensor_reader.FeedbackCommand(
+        max_load_kg=4.2,
+        stress_values=[1.1, -2.2, 3.3, 4.4],
+        strain_value=12.5,
+    ).payload()
+    assert legacy["safeToPass"] == 1
+    assert legacy["twin1"] == 1.1
+    assert legacy["averageStrainTwin"] == 12.5
 
 
 def check_damage_correction_batch_snapshot() -> None:
@@ -358,6 +447,7 @@ CHECKS: List[tuple[str, CheckFn]] = [
     ("environmental_model: degradation and floors", check_environmental_model),
     ("verify_mass: mass and frequency sanity", check_verify_mass),
     ("sensor_reader: traffic spectrum sampling", check_sensor_traffic_spectrum),
+    ("sensor_reader: demo weight multiplier", check_sensor_weight_multiplier),
     ("sensor_reader: WebSocket JSON parser", check_sensor_websocket_parser),
     ("sensor_reader: feedback payload", check_feedback_payload),
     ("damage_model: batch correction snapshot", check_damage_correction_batch_snapshot),

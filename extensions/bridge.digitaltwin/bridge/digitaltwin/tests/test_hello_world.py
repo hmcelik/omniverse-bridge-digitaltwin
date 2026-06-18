@@ -8,6 +8,8 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
+import math
+
 import omni.kit.test
 
 
@@ -25,13 +27,45 @@ class Test(omni.kit.test.AsyncTestCase):
             REAL_TRUSS_WIDTH,
             REAL_TRUSS_HEIGHT,
             MEMBER_AREA,
+            STRAIN_GAUGE_COUNT,
         )
 
-        self.assertEqual(NUM_PANELS, 4)
-        self.assertGreater(REAL_BRIDGE_LENGTH, 0.0)
-        self.assertGreater(REAL_TRUSS_WIDTH, 0.0)
-        self.assertGreater(REAL_TRUSS_HEIGHT, 0.0)
+        self.assertEqual(NUM_PANELS, 5)
+        self.assertAlmostEqual(REAL_BRIDGE_LENGTH, 0.50)
+        self.assertAlmostEqual(REAL_TRUSS_WIDTH, 0.10)
+        self.assertAlmostEqual(REAL_TRUSS_HEIGHT, 0.15)
         self.assertGreater(MEMBER_AREA, 0.0)
+        self.assertEqual(STRAIN_GAUGE_COUNT, 4)
+
+    async def test_bridge_topology_matches_corrected_warren_truss(self):
+        from bridge.digitaltwin.bridge_geometry import _TrussTopology
+
+        topo = _TrussTopology()
+        counts = {}
+        for _a, _b, member_type in topo.members:
+            counts[member_type] = counts.get(member_type, 0) + 1
+
+        self.assertEqual(len(topo.nodes), 22)
+        self.assertEqual(len(topo.members), 58)
+        self.assertEqual(counts["chord_bottom"], 10)
+        self.assertEqual(counts["chord_top"], 8)
+        self.assertEqual(counts["diagonal"], 20)
+        self.assertEqual(counts["cross"], 5)
+        self.assertEqual(counts["deck"], 6)
+        self.assertEqual(counts["deck_diagonal"], 9)
+
+        side_diag = next(
+            i for i, member in enumerate(topo.members)
+            if member[2] == "diagonal")
+        deck_diag = next(
+            i for i, member in enumerate(topo.members)
+            if member[2] == "deck_diagonal")
+        self.assertAlmostEqual(topo.member_real_length(side_diag), math.sqrt(0.025))
+        self.assertAlmostEqual(topo.member_real_length(deck_diag), math.sqrt(0.02))
+        self.assertEqual(topo.diagonal_member_index("L", 2, True), 13)
+        self.assertEqual(topo.diagonal_member_index("L", 2, False), 14)
+        self.assertEqual(topo.diagonal_member_index("R", 2, True), 32)
+        self.assertEqual(topo.diagonal_member_index("R", 2, False), 33)
 
     async def test_damage_model_records_and_resets_damage(self):
         from bridge.digitaltwin.damage_model import DamageModel
@@ -60,6 +94,7 @@ class Test(omni.kit.test.AsyncTestCase):
         self.assertEqual(default_config.mode, "websocket")
         self.assertEqual(default_config.traffic_mode, TrafficMode.UNIFORM.value)
         self.assertGreater(default_config.traffic_intensity_vpm, 0.0)
+        self.assertEqual(len(default_config.gauge_channel_map), 4)
 
         reader = SensorReader(ConnectionConfig(mode="sim"))
         self.assertEqual(reader.mode, "sim")

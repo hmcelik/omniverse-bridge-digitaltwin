@@ -288,14 +288,14 @@ if __name__ == "__main__":
             REAL_BRIDGE_LENGTH as BRIDGE_L, MEMBER_MASS_PER_UNIT_LENGTH as MULL,
         )
     except ImportError:
-        PANELS, PANEL_LEN, HEIGHT = 4, 0.125, 0.10
-        AREA, E_MOD, DENSITY, YIELD = 1e-4, 69e9, 2700.0, 270e6
+        PANELS, PANEL_LEN, HEIGHT = 5, 0.10, 0.15
+        AREA, E_MOD, DENSITY, YIELD = 0.0015 * 0.0015, 69e9, 2700.0, 270e6
         BRIDGE_L = 0.5
         MULL = AREA * DENSITY
 
     bottom = [(i * PANEL_LEN, 0.0) for i in range(PANELS + 1)]
     top    = [((i + 0.5) * PANEL_LEN, HEIGHT) for i in range(PANELS)]
-    nodes  = bottom + top   # 9 nodes
+    nodes  = bottom + top
 
     members: list = []
     for i in range(PANELS):                      # bottom chord
@@ -306,7 +306,7 @@ if __name__ == "__main__":
         members.append((i,          PANELS + 1 + i, AREA, E_MOD))
         members.append((PANELS+1+i, i + 1,          AREA, E_MOD))
 
-    fixed_dofs = [0, 1, 2 * PANELS + 1]   # pin at node 0, roller (v) at node 4
+    fixed_dofs = [0, 1, 2 * PANELS + 1]   # pin at node 0, roller at last bottom node
 
     LOAD_N = 500.0   # N on this truss plane (half of a 1 kN vehicle, lateral_frac=0)
 

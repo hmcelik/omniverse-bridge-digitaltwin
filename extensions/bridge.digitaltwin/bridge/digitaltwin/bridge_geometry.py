@@ -49,14 +49,15 @@ class _TrussTopology:
             self.members.append((f"TL{i}", f"TR{i}", "cross"))
         for i in range(NUM_PANELS + 1):
             self.members.append((f"BL{i}", f"BR{i}", "deck"))
+        for i in range(NUM_PANELS):
+            side_a, side_b = ("L", "R") if i % 2 == 0 else ("R", "L")
+            self.members.append((f"B{side_a}{i}", f"B{side_b}{i+1}", "deck_diagonal"))
+        for i in range(NUM_PANELS - 1):
+            side_a, side_b = ("L", "R") if i % 2 == 0 else ("R", "L")
+            self.members.append((f"T{side_a}{i}", f"T{side_b}{i+1}", "deck_diagonal"))
 
         self.member_lengths = [
-            math.dist(self.nodes[a][:2], self.nodes[b][:2])
-            if self.nodes[a][2] == self.nodes[b][2]
-            else math.dist(
-                (self.nodes[a][0], self.nodes[a][2]),
-                (self.nodes[b][0], self.nodes[b][2])
-            )
+            math.dist(self.nodes[a], self.nodes[b])
             for a, b, _ in self.members
         ]
 
@@ -169,9 +170,9 @@ class _TrussTopology:
             for k, g_idx in enumerate(g_indices):
                 results[g_idx] = r.axial_forces[k]
 
-        # Cross and deck members: zero force in this 2D model
-        for g_idx, (_, _, mtype) in enumerate(self.members):
-            if mtype in ("cross", "deck"):
+        # Members outside the side truss planes are zero-force in this 2D model.
+        for g_idx, _member in enumerate(self.members):
+            if g_idx not in results:
                 results[g_idx] = 0.0
 
         return results
@@ -181,6 +182,31 @@ class _TrussTopology:
         xa, ya, za = self.nodes[la]
         xb, yb, zb = self.nodes[lb]
         return math.dist((xa, ya, za), (xb, yb, zb))
+
+    def member_span_fraction(self, g_idx: int) -> float:
+        la, lb, _ = self.members[g_idx]
+        xa = self.nodes[la][0]
+        xb = self.nodes[lb][0]
+        span = max(NUM_PANELS * REAL_PANEL, 1e-9)
+        return max(0.0, min(1.0, ((xa + xb) * 0.5) / span))
+
+    def diagonal_member_index(self, side: str, panel: int, upward: bool) -> int:
+        side = side.upper()
+        if side not in ("L", "R"):
+            raise ValueError(f"Unknown truss side: {side!r}")
+        if panel < 0 or panel >= NUM_PANELS:
+            raise ValueError(f"Panel index out of range: {panel}")
+
+        if upward:
+            target = (f"B{side}{panel}", f"T{side}{panel}", "diagonal")
+        else:
+            target = (f"T{side}{panel}", f"B{side}{panel + 1}", "diagonal")
+
+        try:
+            return self.members.index(target)
+        except ValueError as exc:
+            name = "DiagUp" if upward else "DiagDn"
+            raise ValueError(f"{name}_{side}_{panel} not found") from exc
 
 
 # USD geometry helpers (same mesh-building logic as original extension)

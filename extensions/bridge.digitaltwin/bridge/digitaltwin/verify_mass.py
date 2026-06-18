@@ -20,27 +20,27 @@ try:
         MEMBER_AREA as AREA_SPEC, MEMBER_MASS_PER_UNIT_LENGTH as MULL_SPEC,
         NUM_PANELS as PANELS, REAL_PANEL as PANEL_LEN,
         REAL_TRUSS_HEIGHT as HEIGHT, REAL_BRIDGE_LENGTH as BRIDGE_L,
+        MEMBER_W, MEMBER_H,
     )
 except ImportError:
     E_MOD, DENSITY, YIELD = 69e9, 2700.0, 270e6
-    AREA_SPEC = 1e-4; MULL_SPEC = AREA_SPEC * DENSITY
-    PANELS, PANEL_LEN, HEIGHT, BRIDGE_L = 4, 0.125, 0.10, 0.5
+    AREA_SPEC = 0.0015 * 0.0015; MULL_SPEC = AREA_SPEC * DENSITY
+    PANELS, PANEL_LEN, HEIGHT, BRIDGE_L = 5, 0.10, 0.15, 0.5
+    MEMBER_W = MEMBER_H = 0.0015
 
 # Scenario B "old model" stiffness area -- hardcoded 4mm x 4mm to demonstrate
 # member_mass_override: stiffness uses this smaller area while mass stays at
 # the physical spec (MULL_SPEC).  Changing bridge_config does NOT affect this.
 AREA_OLD_MODEL = 0.004 * 0.004   # 1.6e-5 m^2  (4 mm x 4 mm)
 
-# Nodes: 5 bottom + 4 top  (single 2-D truss plane)
+# Nodes: bottom bays plus offset top chord nodes (single 2-D truss plane)
 bottom = [(i * PANEL_LEN, 0.0)                for i in range(PANELS + 1)]
 top    = [((i + 0.5) * PANEL_LEN, HEIGHT)     for i in range(PANELS)]
-NODES  = bottom + top   # 9 nodes, 0-indexed
+NODES  = bottom + top
 
-# Boundary conditions: pin at node 0 (DOFs 0,1), roller (v only) at node 4 (DOF 9)
-# DOF index = 2*node + component (0=x, 1=y).  Roller constrains y of node 4:
-#   2*4 + 1 = 9.  Using 2*PANELS (=8) would fix the x-DOF instead, leaving y
-#   unconstrained and producing a spurious zero-frequency rigid-body mode.
-FIXED_DOFS = [0, 1, 2 * PANELS + 1]   # = [0, 1, 9]  -- matches extension.py
+# Boundary conditions: pin at first bottom node, roller (v only) at last bottom
+# node. DOF index = 2*node + component (0=x, 1=y).
+FIXED_DOFS = [0, 1, 2 * PANELS + 1]
 
 
 def _build_members(area: float) -> list:
@@ -60,7 +60,7 @@ _SEP = "=" * 65
 
 # 1.  Structural mass audit
 print(_SEP)
-print("STEP 1 -- STRUCTURAL MASS AUDIT  (A = 1e-4 m^2, density = 2700 kg/m^3)")
+print("STEP 1 -- STRUCTURAL MASS AUDIT")
 print(_SEP)
 
 members_spec = _build_members(AREA_SPEC)
@@ -80,7 +80,10 @@ for ni, nj, area, _ in members_spec:
 
 total_len = sum(r[2] for r in member_detail)
 
-print("  Section: 10 mm x 10 mm,  A = {:.2e} m^2".format(AREA_SPEC))
+print("  Side plane: {} bottom bays, {} top chord segments".format(
+    PANELS, PANELS - 1))
+print("  Section: {:.1f} mm x {:.1f} mm,  A = {:.2e} m^2".format(
+    MEMBER_W * 1e3, MEMBER_H * 1e3, AREA_SPEC))
 print("  m/L = A x density = {:.4f} kg/m".format(MULL_SPEC))
 print("  Members: {}  |  total member length = {:.4f} m".format(
     len(members_spec), total_len))
@@ -257,8 +260,8 @@ f1_B = freqs_B[0] if freqs_B else float("nan")
 mass_ratio = AREA_SPEC / AREA_OLD_MODEL   # 6.25 x
 freq_ratio = math.sqrt(mass_ratio)        # 2.5 x
 print("  OpenSeesPy f1:")
-print("    Scenario A  (bridge_config 10mm x 10mm, consistent):  {:>8.2f} Hz".format(f1_A))
-print("    Scenario B  (4mm stiffness + 10mm mass override):     {:>8.2f} Hz".format(f1_B))
+print("    Scenario A  (bridge_config section, consistent):       {:>8.2f} Hz".format(f1_A))
+print("    Scenario B  (4mm stiffness + spec mass override):      {:>8.2f} Hz".format(f1_B))
 print()
 print("  member_mass_override effect:")
 print("    Scenario B mass is {:.2f}x Scenario A mass (same m/L, smaller K)".format(mass_ratio))

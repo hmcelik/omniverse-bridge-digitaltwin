@@ -12,10 +12,10 @@ DENSITY        = 2700.0  # density (kg/m^3)
 GRAVITY        = 9.81    # gravitational acceleration (m/s^2)
 
 # 2.  Bridge geometry
-NUM_PANELS         = 4
+NUM_PANELS         = 5
 REAL_BRIDGE_LENGTH = 0.5    # span (m)
-REAL_TRUSS_HEIGHT  = 0.10   # truss depth, centre-to-centre (m)
-REAL_TRUSS_WIDTH   = 0.12   # width between the two side-planes (m)
+REAL_TRUSS_HEIGHT  = 0.15   # truss depth, centre-to-centre (m)
+REAL_TRUSS_WIDTH   = 0.10   # width between the two side-planes (m)
 REAL_PANEL         = REAL_BRIDGE_LENGTH / NUM_PANELS  # panel length (m) -- derived
 
 # 3.  Member cross-section  (1.5 mm x 1.5 mm solid rectangular bar)
@@ -101,7 +101,11 @@ ENV_INDOOR_MULTIPLIER  = 1.0
 # rainflow distribution, and DAF-formula approximation.
 FAST_VS_ACCURATE_THRESHOLD = 0.35
 
-# 9.  Scene / viewport display constants  (Omniverse only)
+# 9.  Physical strain-gauge setup
+STRAIN_GAUGE_COUNT = 4
+STRAIN_FEEDBACK_GAIN = 70.0
+
+# 10.  Scene / viewport display constants  (Omniverse only)
 SCENE_SCALE  = 20.0                              # real metres -> scene units
 TRUSS_LENGTH = REAL_BRIDGE_LENGTH * SCENE_SCALE  # scene-unit span
 TRUSS_HEIGHT = REAL_TRUSS_HEIGHT  * SCENE_SCALE  # scene-unit height
