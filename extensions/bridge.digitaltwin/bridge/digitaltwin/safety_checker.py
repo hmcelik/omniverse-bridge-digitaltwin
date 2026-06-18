@@ -54,6 +54,11 @@ class Alert:
     level: AlertLevel
     message: str
     member_index: Optional[int] = None   # None if vehicle-level alert
+    # Source of the alert.  Used to decide which alerts gate "safe to pass":
+    # only "stress", "fatigue", "crack", "weight" and "speed" count.  Advisory
+    # sources ("resonance", "sensor", "environment") are shown to the operator
+    # but do not by themselves stop a vehicle.
+    category: str = "general"
 
     def __str__(self) -> str:
         prefix = {AlertLevel.INFO: "INFO", AlertLevel.WARNING: "WARN",
@@ -118,12 +123,14 @@ class SafetyChecker:
                     AlertLevel.CRITICAL,
                     f"Do not cross -- member {m_idx} at {pct:.0f}% yield",
                     m_idx,
+                    category="stress",
                 ))
             elif ratio > 0.7:
                 alerts.append(Alert(
                     AlertLevel.WARNING,
                     f"Reduce speed -- high stress on member {m_idx} ({ratio*100:.0f}% yield)",
                     m_idx,
+                    category="stress",
                 ))
 
             if d >= 1.0:
@@ -131,6 +138,7 @@ class SafetyChecker:
                     AlertLevel.CRITICAL,
                     f"Member {m_idx} has exceeded fatigue life (D={d:.2f})",
                     m_idx,
+                    category="fatigue",
                 ))
             elif d > 0.7:
                 pct_life = d * 100.0
@@ -138,6 +146,7 @@ class SafetyChecker:
                     AlertLevel.WARNING,
                     f"Member {m_idx} approaching fatigue limit ({pct_life:.0f}% life used)",
                     m_idx,
+                    category="fatigue",
                 ))
 
             crack_ratio = damage.get_crack_ratio(m_idx)
@@ -147,6 +156,7 @@ class SafetyChecker:
                     f"Fracture risk - member {m_idx} crack is "
                     f"{crack_ratio*100:.0f}% of critical size",
                     m_idx,
+                    category="crack",
                 ))
             elif crack_ratio > 0.5:
                 alerts.append(Alert(
@@ -154,6 +164,7 @@ class SafetyChecker:
                     f"Crack growth - member {m_idx} crack is "
                     f"{crack_ratio*100:.0f}% of critical size",
                     m_idx,
+                    category="crack",
                 ))
 
         # --- Vehicle-level checks (against dynamic limits) ---
@@ -162,6 +173,7 @@ class SafetyChecker:
                 AlertLevel.WARNING,
                 f"Vehicle exceeds current capacity "
                 f"({vehicle.weight_kg:.3f} kg > {eff_load_limit:.3f} kg)",
+                category="weight",
             ))
 
         if vehicle.speed_ms > eff_speed_limit:
@@ -169,15 +181,19 @@ class SafetyChecker:
                 AlertLevel.WARNING,
                 f"Over speed limit ({vehicle.speed_ms:.2f} m/s, "
                 f"limit {eff_speed_limit:.2f} m/s at current load & damage)",
+                category="speed",
             ))
 
-        # --- Dynamic / environmental checks (new) ---
+        # --- Dynamic / environmental checks (advisory only) ---
+        # These are surfaced to the operator but do NOT gate "safe to pass";
+        # the pass/stop decision uses weight, speed, and bridge damage only.
         if resonance_detected:
             fn_str = (f" (f_n={self.natural_frequency_hz:.2f} Hz)"
                       if self.natural_frequency_hz else "")
             alerts.append(Alert(
                 AlertLevel.WARNING,
                 f"Resonance risk -- vehicle speed near bridge natural frequency{fn_str}",
+                category="resonance",
             ))
 
         if (fast_vs_accurate_error is not None
@@ -188,6 +204,7 @@ class SafetyChecker:
                 f"Sensor anomaly -- dynamic FEM deviates {pct:.0f}% from fast estimate "
                 f"(threshold {_FAST_VS_ACCURATE_THRESHOLD*100:.0f}%); "
                 "check sensor calibration",
+                category="sensor",
             ))
 
         if env_yield_knockdown > 0.05:
@@ -195,6 +212,7 @@ class SafetyChecker:
             alerts.append(Alert(
                 AlertLevel.INFO,
                 f"Material ageing: {pct:.1f}% yield reduction from environmental exposure",
+                category="environment",
             ))
 
         alerts.sort(key=lambda a: (-int(a.level), a.member_index is None))

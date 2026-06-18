@@ -1167,8 +1167,16 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
         except Exception as exc:
             print(f"[bridge] Could not queue feedback update: {exc}")
 
+    # Categories that actually stop a vehicle.  Resonance and sensor-anomaly
+    # alerts are advisory only -- the pass/stop decision uses the vehicle weight,
+    # its speed, and the damage present on the bridge (stress, fatigue, crack).
+    _STOP_CATEGORIES = ("stress", "fatigue", "crack", "weight", "speed")
+
     def _safe_to_pass_from_alerts(self, alerts: List[Alert]) -> bool:
-        return not any(a.level >= AlertLevel.WARNING for a in alerts)
+        return not any(
+            a.level >= AlertLevel.WARNING and a.category in self._STOP_CATEGORIES
+            for a in alerts
+        )
 
     def _format_feedback_payload(self, payload: dict) -> str:
         if not payload:
