@@ -20,7 +20,7 @@ REAL_PANEL         = REAL_BRIDGE_LENGTH / NUM_PANELS  # panel length (m) -- deri
 
 # 3.  Member cross-section  (1.5 mm x 1.5 mm solid rectangular bar)
 MEMBER_W    = 0.0015                                       # width  (m)
-MEMBER_H    = 0.0015                                       # height (m)
+MEMBER_H    = 0.006                                       # height (m)
 MEMBER_AREA = MEMBER_W * MEMBER_H                          # cross-section area (m^2)
 MEMBER_IXX  = MEMBER_W * MEMBER_H ** 3 / 12.0              # bending inertia about local x-like section axis (m^4)
 MEMBER_IYY  = MEMBER_H * MEMBER_W ** 3 / 12.0              # bending inertia about local y-like section axis (m^4)

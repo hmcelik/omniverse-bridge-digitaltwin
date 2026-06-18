@@ -278,8 +278,12 @@ def _make_member(stage, path, p1, p2, ctype, member_index=None):
     prim.CreateAttribute("analysis:memberLength", Sdf.ValueTypeNames.Float).Set(float(length))
     prim.CreateAttribute("scene:scaleFactor",     Sdf.ValueTypeNames.Float).Set(SCENE_SCALE)
     prim.CreateAttribute("analysis:damage",       Sdf.ValueTypeNames.Float).Set(0.0)
+    prim.CreateAttribute("analysis:crackRatio",   Sdf.ValueTypeNames.Float).Set(0.0)
     if member_index is not None:
         prim.CreateAttribute("analysis:memberIndex", Sdf.ValueTypeNames.Int).Set(member_index)
+    dc = UsdGeom.Gprim(prim).CreateDisplayColorAttr()
+    dc.Set([Gf.Vec3f(0.0, 0.8, 0.0)])
+    UsdGeom.Primvar(dc).SetInterpolation(UsdGeom.Tokens.constant)
     return prim
 
 

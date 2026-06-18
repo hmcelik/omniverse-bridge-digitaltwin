@@ -45,12 +45,10 @@ from .sensor_reader import (
 from .sensor_validation import SensorResidual, compute_sensor_residuals
 
 # Colour helpers
-_DAMAGE_THRESHOLDS = [
-    (0.3, Gf.Vec3f(0.0, 0.8, 0.0)),   # HEALTHY  -> green
-    (0.7, Gf.Vec3f(1.0, 0.8, 0.0)),   # WORN     -> yellow
-    (1.0, Gf.Vec3f(1.0, 0.4, 0.0)),   # WARNING  -> orange
-]
 _DAMAGE_CRITICAL = Gf.Vec3f(1.0, 0.0, 0.0)  # CRITICAL -> red
+_HEALTHY_COLOR = Gf.Vec3f(0.0, 0.8, 0.0)
+_WORN_COLOR = Gf.Vec3f(1.0, 0.8, 0.0)
+_WARNING_COLOR = Gf.Vec3f(1.0, 0.4, 0.0)
 
 
 def _stress_color(ratio: float) -> Gf.Vec3f:
@@ -59,11 +57,26 @@ def _stress_color(ratio: float) -> Gf.Vec3f:
     return Gf.Vec3f(r, g, 0.0)
 
 
-def _damage_color(d: float) -> Gf.Vec3f:
-    for threshold, color in _DAMAGE_THRESHOLDS:
-        if d < threshold:
-            return color
-    return _DAMAGE_CRITICAL
+def _lerp_color(a: Gf.Vec3f, b: Gf.Vec3f, t: float) -> Gf.Vec3f:
+    t = max(0.0, min(1.0, float(t)))
+    return Gf.Vec3f(
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    )
+
+
+def _damage_color(d: float, crack_ratio: float = 0.0) -> Gf.Vec3f:
+    severity = max(float(d), float(crack_ratio), 0.0)
+    if severity >= 1.0:
+        return _DAMAGE_CRITICAL
+    if severity >= 0.7:
+        return _lerp_color(_WARNING_COLOR, _DAMAGE_CRITICAL,
+                           (severity - 0.7) / 0.3)
+    if severity >= 0.3:
+        return _lerp_color(_WORN_COLOR, _WARNING_COLOR,
+                           (severity - 0.3) / 0.4)
+    return _lerp_color(_HEALTHY_COLOR, _WORN_COLOR, severity / 0.3)
 
 
 def _alert_style(level: AlertLevel) -> dict:
@@ -214,6 +227,7 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
             UsdGeom.Xform.Define(stage, "/World")
             UsdGeom.Xform.Define(stage, "/World/Bridge")
             self._member_prims = {}
+            self._last_fem = None
 
             panel = TRUSS_LENGTH / NUM_PANELS
             x0 = -TRUSS_LENGTH / 2.0
@@ -316,6 +330,8 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
             self._compute_structural_capacity()
             self._setup_fast_frame_solver()
             self._setup_dynamic_analyser()
+            if self._coloring_mode == "damage":
+                self._apply_damage_colors()
 
         except Exception as exc:
             import traceback as tb
@@ -1257,6 +1273,23 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
         )
 
     # USD color + attribute writer
+    def _set_member_color(self, stage, m_idx: int, color: Gf.Vec3f) -> None:
+        for path in self._member_prims.get(m_idx, []):
+            prim = stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                continue
+            idx_attr = prim.GetAttribute("analysis:memberIndex")
+            if idx_attr and idx_attr.Get() != m_idx:
+                print(
+                    f"[bridge] WARNING: member path {path} has index "
+                    f"{idx_attr.Get()}, expected {m_idx}; skipping color update."
+                )
+                continue
+            gp = UsdGeom.Gprim(prim)
+            ca = gp.CreateDisplayColorAttr()
+            ca.Set([color])
+            UsdGeom.Primvar(ca).SetInterpolation(UsdGeom.Tokens.constant)
+
     def _apply_colors(self, forces: Dict[int, float]):
         stage = omni.usd.get_context().get_stage()
         if not stage:
@@ -1264,7 +1297,9 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
         if self._coloring_mode == "damage":
             self._apply_damage_colors()
             return
-        for m_idx, force in forces.items():
+        n_members = len(getattr(self._topo, "members", []))
+        for m_idx in range(n_members):
+            force = float(forces.get(m_idx, 0.0))
             stress = abs(force) / MEMBER_AREA
             ratio  = stress / YIELD_STRENGTH
             d      = self._damage.get_damage(m_idx)
@@ -1294,10 +1329,7 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
                 _set_attr(prim, "analysis:damage",      float(d))
                 _set_attr(prim, "analysis:failureMode",
                           mode if util >= 1.0 else "ok")
-                gp = UsdGeom.Gprim(prim)
-                ca = gp.CreateDisplayColorAttr()
-                ca.Set([color])
-                UsdGeom.Primvar(ca).SetInterpolation(UsdGeom.Tokens.constant)
+            self._set_member_color(stage, m_idx, color)
 
     def _apply_damage_colors(self) -> None:
         stage = omni.usd.get_context().get_stage()
@@ -1306,16 +1338,15 @@ class MyExtension(BridgeUIMixin, omni.ext.IExt):
         n_members = len(getattr(self._topo, "members", []))
         for m_idx in range(n_members):
             d = self._damage.get_damage(m_idx)
-            color = _damage_color(d)
+            crack_ratio = self._damage.get_crack_ratio(m_idx)
+            color = _damage_color(d, crack_ratio)
             for path in self._member_prims.get(m_idx, []):
                 prim = stage.GetPrimAtPath(path)
                 if not prim or not prim.IsValid():
                     continue
                 _set_attr(prim, "analysis:damage", float(d))
-                gp = UsdGeom.Gprim(prim)
-                ca = gp.CreateDisplayColorAttr()
-                ca.Set([color])
-                UsdGeom.Primvar(ca).SetInterpolation(UsdGeom.Tokens.constant)
+                _set_attr(prim, "analysis:crackRatio", float(crack_ratio))
+            self._set_member_color(stage, m_idx, color)
 
 
 
